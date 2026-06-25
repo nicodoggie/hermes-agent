@@ -8010,8 +8010,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self._manual_compress(cmd_original)
         elif canonical == "usage":
             self._show_usage()
-        elif canonical == "credits":
-            self._show_credits()
         elif canonical == "subscription":
             self._show_subscription()
         elif canonical == "topup":
@@ -8940,19 +8938,23 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 _cprint(f"  {_b(f'Plan: {plan}{renews}')}")
                 printed_any = True
 
+            # All lines below go through _cprint (same renderer as the Plan line) so
+            # ordering is deterministic: raw print() and _cprint() flush to different
+            # buffers under patch_stdout and interleave nondeterministically (the bar
+            # would race above/below the Plan line across states). Keep one path.
             pb = usage.plan_bar
             if pb is not None and pb.total_usd > 0:
                 bar, _ = self._billing_spend_bar(pb.spent_usd, pb.total_usd)
                 _pct_s = f" · {pb.pct_used}% used" if pb.pct_used is not None else ""
                 _label = (usage.plan_name or "plan").ljust(8)[:8]
-                print(f"  {_label}[{bar}]  ${pb.remaining_usd:,.2f} left of ${pb.total_usd:,.2f}{_pct_s}")
+                _cprint(f"  {_label}[{bar}]  ${pb.remaining_usd:,.2f} left of ${pb.total_usd:,.2f}{_pct_s}")
                 printed_any = True
             tb = usage.topup_bar
             if tb is not None and tb.remaining_usd > 0:
-                print(f"  {'top-up'.ljust(8)}[{'█' * 10}]  ${tb.remaining_usd:,.2f} · never expires")
+                _cprint(f"  {'top-up'.ljust(8)}[{'█' * 10}]  ${tb.remaining_usd:,.2f} · never expires")
                 printed_any = True
             if usage.has_topup and usage.total_spendable_usd is not None:
-                print(f"  Total spendable: ${usage.total_spendable_usd:,.2f}")
+                _cprint(f"  Total spendable: ${usage.total_spendable_usd:,.2f}")
 
             if usage.status == "free":
                 _cprint(f"  {_d('> Free · free models only. Run /subscription to reach paid models.')}")
@@ -8999,7 +9001,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         page (NOT the Stripe portal; that page routes upgrade→Checkout /
         downgrade→scheduled internally). The terminal NEVER charges for a
         subscription. Fail-open: logged-out / portal hiccup degrades to a clear
-        message, never a crash. Mirrors ``_show_credits`` / ``_show_billing``
+        message, never a crash. Mirrors ``_show_billing``
         discipline for the interactive-vs-text split.
         """
         from agent.subscription_view import build_subscription_state, subscription_manage_url
@@ -9130,7 +9132,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         # Non-interactive (TUI slash-worker / piped / no live app): the
         # prompt_toolkit modal can't run here. Render the text hand-off — the
-        # URL is the affordance, same discipline as _show_credits.
+        # URL is the affordance, same discipline as _show_billing.
         if not getattr(self, "_app", None):
             print()
             print(f"  Manage your subscription: {manage_url}")
@@ -9144,7 +9146,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             ("cancel", "Cancel", "do nothing"),
         ]
         raw = self._prompt_text_input_modal(
-            title="⚕ Manage your subscription",
+            title="Manage your subscription",
             detail="Pick an option to manage your subscription in the browser.",
             choices=choices,
         )
@@ -9171,86 +9173,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         else:
             print("  🟡 Cancelled. No plan change.")
 
-    def _show_credits(self):
-        """`/credits` — focused Nous credit balance + top-up handoff.
-
-        Interactive CLI: balance block + identity line + a 3-button panel
-        (Open top-up / Copy link / Cancel). Non-interactive contexts — the TUI
-        slash-worker subprocess and any place without a live prompt_toolkit app
-        (``self._app is None``) — render a text variant (balance + tappable
-        top-up URL), because the modal would try to read the RPC stdin and crash
-        the worker. The terminal never confirms or polls payment (billing phase
-        2a). Fail-open: a portal hiccup or logged-out account degrades to a clear
-        message, never a crash.
-        """
-        from agent.account_usage import build_credits_view
-
-        view = build_credits_view()
-
-        if not view.logged_in:
-            print()
-            _cprint(f"  💳 {_d('Not logged into Nous Portal.')}")
-            print("  Run `hermes portal` to log in, then /credits.")
-            return
-
-        print()
-        print("  💳 Nous credits")
-        print(f"  {'─' * 41}")
-        for line in view.balance_lines:
-            # Drop the helper's own "📈 Nous credits" header — we print our own.
-            if line.lstrip().startswith("📈"):
-                continue
-            print(f"  {line}")
-        print(f"  {'─' * 41}")
-        if view.identity_line:
-            print(f"  {view.identity_line}")
-
-        if not view.topup_url:
-            return
-
-        # Non-interactive (TUI slash-worker, piped, no live app): the
-        # prompt_toolkit modal can't run here — it would read the worker's
-        # JSON-RPC stdin and crash the command. Render the text variant: the
-        # tappable URL IS the affordance, same as the messaging surfaces.
-        if not getattr(self, "_app", None):
-            print()
-            print(f"  Top up: {view.topup_url}")
-            print("  Complete your top-up in the browser — credits will appear in /credits shortly.")
-            return
-
-        choices = [
-            ("open", "Open top-up in browser", "launch the portal billing page"),
-            ("copy", "Copy link", "copy the top-up URL to your clipboard"),
-            ("cancel", "Cancel", "do nothing"),
-        ]
-        raw = self._prompt_text_input_modal(
-            title="💳 Add credits?",
-            detail=f"Top-up page:\n{view.topup_url}",
-            choices=choices,
-        )
-        choice = self._normalize_slash_confirm_choice(raw, choices)
-
-        if choice == "open":
-            opened = False
-            try:
-                import webbrowser
-
-                opened = webbrowser.open(view.topup_url)
-            except Exception:
-                opened = False
-            if not opened:
-                print(f"  Open this URL to top up: {view.topup_url}")
-            print()
-            print("  Complete your top-up in the browser — credits will appear in /credits shortly.")
-        elif choice == "copy":
-            try:
-                self._write_osc52_clipboard(view.topup_url)
-                print(f"  📋 Copied: {view.topup_url}")
-            except Exception:
-                print(f"  Top-up URL: {view.topup_url}")
-        else:
-            print("  🟡 Cancelled. No credits added.")
-
     # ------------------------------------------------------------------
     # /billing — Phase 2b terminal billing (CLI surface, all 5 screens)
     # ------------------------------------------------------------------
@@ -9266,7 +9188,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         Interactive CLI uses the prompt_toolkit modal; non-interactive contexts
         (TUI slash-worker / no live app) render text + the portal deep-link, never
-        prompting (the URL is the affordance), same discipline as ``_show_credits``.
+        prompting (the URL is the affordance), same discipline as ``_show_billing``.
         All money is Decimal end-to-end; the terminal never collects card details.
         """
         from agent.billing_view import build_billing_state
@@ -9352,14 +9274,32 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self._billing_portal_hint(state, reason="Enable it on the portal to add funds here.")
             return
 
-        # Optimistic funnel: no card on file → a charge will 403 no_payment_method.
-        # Surface that up front (with the portal link) but DON'T hide Add funds —
-        # the card field can't fully prove chargeability, so we advise not gate.
+        # No card on file → a charge can't succeed. Don't offer charge/auto-reload
+        # actions (they'd 403 no_payment_method or punt). Route to the portal to add
+        # a REUSABLE card, then the user returns to a refreshed overview. This is a
+        # half-done state — NOT a success.
         if state.card is None:
             _cprint(
-                f"  {_d('No saved card for terminal charges yet — set one up on the portal first.')}"
+                f"  {_d('No card on file — add one on the portal to charge from the terminal.')}"
             )
-            self._billing_portal_hint(state)
+            if not getattr(self, "_app", None):
+                self._billing_portal_hint(state)
+                return
+            add_card_choices = [
+                ("portal", "Add a card on the portal", "opens the billing page to save a reusable card"),
+                ("cancel", "Cancel", "do nothing"),
+            ]
+            raw = self._prompt_text_input_modal(
+                title="Add a card to continue",
+                detail="No saved card yet. Add one on the portal, then re-run /topup to add funds.",
+                choices=add_card_choices,
+            )
+            choice = self._normalize_slash_confirm_choice(raw, add_card_choices)
+            if choice == "portal":
+                self._billing_open_portal(state)
+                print()
+                _cprint(f"  {_d('Added a card? Re-run /topup to add funds.')}")
+            return
 
         # Non-interactive (slash-worker / no live app): no modal, no sub-command
         # advertising — just the portal funnel (the URL is the affordance).
@@ -9369,6 +9309,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         # Add funds first, then settings, then the scopeless browser handoff.
         # No "Enable terminal billing" item — that's discovered at pay time.
+        # "Add funds" charges in-terminal against the org's portal-saved card
+        # (server-held via POST /charge — no card ref leaves the client). No card
+        # on file → _billing_buy_flow detects no_payment_method and routes to the
+        # portal to add one.
         choices = [
             ("buy", "Add funds", "add money to your balance"),
             ("auto", "Auto-reload", "configure automatic top-ups"),
@@ -9379,7 +9323,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         # The overview summary is already printed above; the modal only needs to
         # present the action menu — repeating the title/balance reads as a dupe.
         raw = self._prompt_text_input_modal(
-            title="💳 Top up your balance", detail="",
+            title="Top up your balance", detail="",
             choices=choices,
         )
         choice = self._normalize_slash_confirm_choice(raw, choices)
@@ -9455,6 +9399,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         if not self._billing_require_admin(state):
             return
 
+        # Card gate: no saved card → a charge would 403 no_payment_method. Route to
+        # the portal to add a reusable card instead of offering doomed presets.
+        if state.card is None:
+            print()
+            _cprint(f"  {_d('No card on file — add one on the portal first, then re-run /topup.')}")
+            self._billing_portal_hint(state)
+            return
+
         # Screen 3 — preset selection.
         if not getattr(self, "_app", None):
             presets = ", ".join(format_money(p) for p in state.charge_presets)
@@ -9474,7 +9426,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         card = state.card
         detail = f"Payment: {card.masked}" if card else "No saved card on file"
         raw = self._prompt_text_input_modal(
-            title="💳 Add funds", detail=detail, choices=preset_choices,
+            title="Add funds", detail=detail, choices=preset_choices,
         )
         choice = self._normalize_slash_confirm_choice(raw, preset_choices)
         if not choice or choice == "cancel":
@@ -9516,6 +9468,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         print(f"  Total: {format_money(amount)}")
         if card:
             print(f"  Payment: {card.masked}")
+            _cprint(f"  {_d('Your card saved on the portal will be charged.')}")
         print(f"  {'─' * 41}")
         _consent = (
             "By confirming, you allow Nous Research to charge your card."
@@ -9524,17 +9477,21 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         confirm_choices = [
             ("pay", f"Pay {format_money(amount)} now", "submit the charge"),
+            ("portal", "Manage on portal", "manage your card / billing in the browser"),
             ("cancel", "Go back", "do not charge"),
         ]
         if not getattr(self, "_app", None):
             print("  Run in the interactive CLI to confirm a purchase.")
             return
         raw = self._prompt_text_input_modal(
-            title=f"💳 Pay {format_money(amount)}?",
+            title=f"Pay {format_money(amount)}?",
             detail=(card.masked if card else "no saved card"),
             choices=confirm_choices,
         )
         choice = self._normalize_slash_confirm_choice(raw, confirm_choices)
+        if choice == "portal":
+            self._billing_open_portal(state)
+            return
         if choice != "pay":
             print("  Cancelled. No funds added.")
             return
@@ -9691,7 +9648,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             ("no", "Not now", "cancel"),
         ]
         raw = self._prompt_text_input_modal(
-            title="💳 Enable terminal billing",
+            title="Enable terminal billing",
             detail="Opens your browser to authorize this terminal.",
             choices=confirm_choices,
         )
@@ -9722,6 +9679,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self._billing_portal_hint(fresh)
             return
 
+        # Scope granted + org kill-switch on — but a charge still needs a card on
+        # file. If there's none, this is a half-done state: say so and route to the
+        # portal to add a card, rather than a bare "✓ enabled" that reads as done.
+        if fresh.card is None:
+            print("  ✓ Terminal billing enabled — but there's no card on file yet.")
+            _cprint(f"  {_d('Add a card on the portal, then re-run the action to continue.')}")
+            self._billing_portal_hint(fresh)
+            return
+
         # Nothing to resume (scope-required hit outside a charge, e.g. auto-reload
         # config) → just tell the user it's ready.
         if amount is None:
@@ -9736,7 +9702,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             ("cancel", "Cancel", "do not charge"),
         ]
         raw = self._prompt_text_input_modal(
-            title="💳 Resume your top-up",
+            title="Resume your top-up",
             detail=f"{format_money(amount)} is ready to finish — press Enter to resume.",
             choices=resume_choices,
         )
@@ -9808,7 +9774,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 ("cancel", "Cancel", "do nothing"),
             ]
             raw = self._prompt_text_input_modal(
-                title="💳 Auto-reload",
+                title="Auto-reload",
                 detail=(
                     f"On — below {format_money(ar.threshold_usd)} → "
                     f"reload to {format_money(ar.reload_to_usd)}"
@@ -9878,7 +9844,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             ("cancel", "Cancel", "do nothing"),
         ]
         raw = self._prompt_text_input_modal(
-            title="💳 Turn on auto-reload?",
+            title="Turn on auto-reload?",
             detail=f"Below {format_money(threshold_amt)} → reload to {format_money(reload_amt)}",
             choices=confirm_choices,
         )
