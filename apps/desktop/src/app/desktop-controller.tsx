@@ -89,6 +89,7 @@ import {
 import { ChatSidebar } from './chat/sidebar'
 import { CommandPalette } from './command-palette'
 import { useGatewayBoot } from './gateway/hooks/use-gateway-boot'
+import { useGatewaySwitchPreview } from './gateway/hooks/use-gateway-switch-preview'
 import { useGatewayRequest } from './gateway/hooks/use-gateway-request'
 import { useKeybinds } from './hooks/use-keybinds'
 import { SIDEBAR_COLLAPSE_MEDIA_QUERY } from './layout-constants'
@@ -887,6 +888,7 @@ export function DesktopController() {
     refreshHermesConfig,
     refreshSessions
   })
+  useGatewaySwitchPreview()
 
   useEffect(() => {
     if (gatewayState === 'open') {

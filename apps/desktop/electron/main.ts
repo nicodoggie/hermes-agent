@@ -802,6 +802,9 @@ function registerMediaProtocol() {
 let mainWindow = null
 let hermesProcess = null
 let connectionPromise = null
+// True while connection-config:apply soft-rehomes the primary — suppresses the
+// backend-exit toast so an intentional kill doesn't look like a crash.
+let softRehomeInProgress = false
 // Additional per-profile backends, keyed by profile name. The PRIMARY backend
 // (the desktop's launch profile) stays managed by hermesProcess +
 // connectionPromise + startHermes(); this pool only holds EXTRA profile
@@ -4491,6 +4494,12 @@ function getWindowState() {
 }
 
 function sendBackendExit(payload) {
+  // Intentional soft re-home (gateway mode apply) kills the child on purpose —
+  // don't surface the "backend stopped" error toast / boot-failure path.
+  if (softRehomeInProgress) {
+    return
+  }
+
   if (!mainWindow || mainWindow.isDestroyed()) {
     return
   }
@@ -6321,26 +6330,57 @@ function stopBackendChild(child) {
   }
 }
 
-function resetHermesConnection() {
+// Soft gateway-mode apply: tear down the primary without resetting boot UI or
+// reloading the renderer. The shell stays up; the renderer wipes session lists
+// (so skeletons retrigger) and re-dials. Distinct from hard re-home (profile
+// switch / crash recovery), which still resets boot progress + reloads.
+function resetHermesConnection({ soft = false } = {}) {
   connectionPromise = null
   backendStartFailure = null
 
   stopBackendChild(hermesProcess)
 
   hermesProcess = null
-  resetBootProgressForReconnect()
+
+  if (!soft) {
+    resetBootProgressForReconnect()
+  }
 }
 
 // Re-home the primary backend: reset connection state, then wait for the live
 // dashboard process to actually exit (SIGKILL after 5s) so the next
 // startHermes() spawns fresh instead of racing the dying one. Shared by the
 // connection-config and profile switch flows.
-async function teardownPrimaryBackendAndWait() {
+async function teardownPrimaryBackendAndWait({ soft = false } = {}) {
   // Capture the reference before resetHermesConnection() nulls hermesProcess.
   const dying = hermesProcess && !hermesProcess.killed ? hermesProcess : null
-  resetHermesConnection()
 
-  await waitForBackendExit(dying)
+  if (soft) {
+    softRehomeInProgress = true
+  }
+
+  try {
+    resetHermesConnection({ soft })
+    await waitForBackendExit(dying)
+  } finally {
+    if (soft) {
+      softRehomeInProgress = false
+    }
+  }
+}
+
+function sendConnectionApplied() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return
+  }
+
+  const { webContents } = mainWindow
+
+  if (!webContents || webContents.isDestroyed()) {
+    return
+  }
+
+  webContents.send('hermes:connection:applied')
 }
 
 async function waitForBackendExit(child, timeoutMs = 5000) {
@@ -7647,10 +7687,11 @@ ipcMain.handle('hermes:connection-config:apply', async (_event, payload) => {
     // re-resolves against the new remote/local target.
     stopPoolBackend(key)
   } else {
-    // Global connection, or the primary profile's connection: re-home the
-    // window backend by tearing it down and reloading the renderer.
-    await teardownPrimaryBackendAndWait()
-    mainWindow?.reload()
+    // Global / primary connection: soft re-home. Tear down the window backend
+    // without resetting boot UI or reloading — the shell stays, the renderer
+    // wipes session lists (skeletons) and re-dials on hermes:connection:applied.
+    await teardownPrimaryBackendAndWait({ soft: true })
+    sendConnectionApplied()
   }
 
   return sanitizeDesktopConnectionConfig(config, payload?.profile)

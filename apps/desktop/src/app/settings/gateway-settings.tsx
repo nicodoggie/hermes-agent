@@ -602,7 +602,7 @@ export function GatewaySettings() {
 
   // Select a discovered agent: drive the silent per-agent cascade (no second
   // prompt — the shared portal session auto-approves), then persist a cloud-mode
-  // connection pointed at its dashboardUrl and apply it (reconnects the window).
+  // connection pointed at its dashboardUrl and apply it (soft-reconnects in place).
   const connectCloudAgent = async (agent: DesktopCloudAgent) => {
     if (!agent.dashboardUrl) {
       return
@@ -629,10 +629,10 @@ export function GatewaySettings() {
         return
       }
 
-      // Persist a cloud-mode connection (remote-shaped, oauth) and reconnect.
-      // Include the selected org so Settings reopens into the same org + instance.
-      // Read the REF (not the cloudOrg state) so a just-resolved org from
-      // discovery in this same render tick is captured, not a stale null.
+  // Persist a cloud-mode connection (remote-shaped, oauth) and soft-reconnect.
+  // Include the selected org so Settings reopens into the same org + instance.
+  // Read the REF (not the cloudOrg state) so a just-resolved org from
+  // discovery in this same render tick is captured, not a stale null.
       const next = await desktop.applyConnectionConfig({
         mode: 'cloud',
         profile: scope ?? undefined,
