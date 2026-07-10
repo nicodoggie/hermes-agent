@@ -3,11 +3,11 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { SegmentedControl } from '@/components/ui/segmented-control'
 import type { DesktopAuthProvider, DesktopCloudAgent, DesktopCloudOrg, DesktopConnectionProbeResult } from '@/global'
 import { useI18n } from '@/i18n'
 import { ExternalLink } from '@/lib/external-link'
 import { AlertCircle, Check, Cloud, FileText, Globe, Loader2, LogIn, Monitor, RefreshCw } from '@/lib/icons'
+import { selectableCardClass } from '@/lib/selectable-card'
 import { cn } from '@/lib/utils'
 import { previewGatewaySwitch } from '@/store/gateway-switch'
 import { notify, notifyError } from '@/store/notifications'
@@ -42,6 +42,45 @@ const EMPTY_STATE: GatewaySettingsState = {
   remoteTokenSet: false,
   remoteUrl: '',
   cloudOrg: ''
+}
+
+function ModeCard({
+  active,
+  description,
+  disabled,
+  icon: Icon,
+  onSelect,
+  title
+}: {
+  active: boolean
+  description: string
+  disabled?: boolean
+  icon: typeof Monitor
+  onSelect: () => void
+  title: string
+}) {
+  return (
+    <button
+      className={cn(
+        'flex h-full min-h-0 w-full flex-col p-3 text-left disabled:cursor-not-allowed disabled:opacity-50',
+        selectableCardClass({ active, prominent: true })
+      )}
+      disabled={disabled}
+      onClick={onSelect}
+      type="button"
+    >
+      <div className="flex items-center gap-2">
+        <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate text-[length:var(--conversation-text-font-size)] font-medium">
+          {title}
+        </span>
+        {active ? <Check className="size-3.5 shrink-0 text-primary" /> : <span className="size-3.5 shrink-0" />}
+      </div>
+      <p className="mt-1.5 flex-1 text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
+        {description}
+      </p>
+    </button>
+  )
 }
 
 function ScopeChip({ active, label, onSelect }: { active: boolean; label: string; onSelect: () => void }) {
@@ -703,31 +742,36 @@ export function GatewaySettings() {
         </div>
       ) : null}
 
-      <div className="mb-5 grid gap-1">
-        <ListRow
-          action={
-            <SegmentedControl
-              className={state.envOverride ? 'pointer-events-none opacity-50' : undefined}
-              onChange={id => {
-                if (state.envOverride) {
-                  return
-                }
-
-                setState(current => ({ ...current, mode: id }))
-              }}
-              options={[
-                { id: 'local' as const, label: g.modeLocal, icon: Monitor },
-                { id: 'cloud' as const, label: g.modeCloud, icon: Cloud },
-                { id: 'remote' as const, label: g.modeRemote, icon: Globe }
-              ]}
-              value={state.mode}
-            />
-          }
-          description={
-            state.mode === 'local' ? g.localDesc : state.mode === 'cloud' ? g.cloudDesc : g.remoteDesc
-          }
-          title={g.modeTitle}
-        />
+      <div className="mb-5 grid gap-2">
+        <div className="text-[length:var(--conversation-caption-font-size)] font-medium text-(--ui-text-secondary)">
+          {g.modeTitle}
+        </div>
+        <div className="grid auto-rows-fr grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          <ModeCard
+            active={state.mode === 'local'}
+            description={g.localDesc}
+            disabled={state.envOverride}
+            icon={Monitor}
+            onSelect={() => setState(current => ({ ...current, mode: 'local' }))}
+            title={g.localTitle}
+          />
+          <ModeCard
+            active={state.mode === 'cloud'}
+            description={g.cloudDesc}
+            disabled={state.envOverride}
+            icon={Cloud}
+            onSelect={() => setState(current => ({ ...current, mode: 'cloud' }))}
+            title={g.cloudTitle}
+          />
+          <ModeCard
+            active={state.mode === 'remote'}
+            description={g.remoteDesc}
+            disabled={state.envOverride}
+            icon={Globe}
+            onSelect={() => setState(current => ({ ...current, mode: 'remote' }))}
+            title={g.remoteTitle}
+          />
+        </div>
       </div>
 
       {/* Hermes Cloud panel: one portal sign-in, then a discovered-agent picker
