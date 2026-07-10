@@ -1,14 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { $sessionsLimit, resetSessionsLimit, SIDEBAR_SESSIONS_PAGE_SIZE } from '@/store/layout'
-import { $freshSessionRequest } from '@/store/profile'
 import {
   $cronSessions,
+  $freshDraftReady,
   $messagingSessions,
   $sessions,
   $sessionsLoading,
   $sessionsTotal,
   setCronSessions,
+  setFreshDraftReady,
   setMessagingSessions,
   setSessions,
   setSessionsLoading,
@@ -29,6 +30,7 @@ describe('wipeSessionListsForGatewaySwitch', () => {
     setCronSessions([{ id: 'c1', title: 'cron', profile: 'default' } as never])
     setMessagingSessions([{ id: 'm1', title: 'tg', profile: 'default' } as never])
     setSessionsLoading(false)
+    setFreshDraftReady(false)
     $sessionsLimit.set(SIDEBAR_SESSIONS_PAGE_SIZE * 3)
   })
 
@@ -42,8 +44,6 @@ describe('wipeSessionListsForGatewaySwitch', () => {
   })
 
   it('clears lists and arms loading so sidebar skeletons retrigger', () => {
-    const beforeFresh = $freshSessionRequest.get()
-
     wipeSessionListsForGatewaySwitch()
 
     expect($sessions.get()).toEqual([])
@@ -52,7 +52,7 @@ describe('wipeSessionListsForGatewaySwitch', () => {
     expect($messagingSessions.get()).toEqual([])
     expect($sessionsLoading.get()).toBe(true)
     expect($sessionsLimit.get()).toBe(SIDEBAR_SESSIONS_PAGE_SIZE)
-    expect($freshSessionRequest.get()).toBe(beforeFresh + 1)
+    expect($freshDraftReady.get()).toBe(true)
   })
 
   it('previewGatewaySwitch holds skeletons then clears loading', async () => {

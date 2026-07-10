@@ -2,11 +2,11 @@ import { atom } from 'nanostores'
 
 import { queryClient } from '@/lib/query-client'
 import { resetSessionsLimit } from '@/store/layout'
-import { requestFreshSession } from '@/store/profile'
 import {
   setActiveSessionId,
   setAttentionSessionIds,
   setCronSessions,
+  setFreshDraftReady,
   setMessages,
   setMessagingPlatformTotals,
   setMessagingSessions,
@@ -33,6 +33,10 @@ const PREVIEW_HOLD_MS = 1400
  * the existing list, so without an explicit wipe a soft switch would keep
  * painting the previous gateway's rows. RQ caches (settings/config/skills) are
  * invalidated separately; the live session list is this path.
+ *
+ * Does NOT call requestFreshSession() — that navigates to NEW_CHAT and would
+ * close route overlays (Settings). Clear chat state in place; leave the URL
+ * alone so the user stays where they were (e.g. mid-Gateway settings).
  */
 export function wipeSessionListsForGatewaySwitch(): void {
   setSessions([])
@@ -50,7 +54,7 @@ export function wipeSessionListsForGatewaySwitch(): void {
   setActiveSessionId(null)
   setSelectedStoredSessionId(null)
   setMessages([])
-  requestFreshSession()
+  setFreshDraftReady(true)
 
   void queryClient.invalidateQueries()
 }
