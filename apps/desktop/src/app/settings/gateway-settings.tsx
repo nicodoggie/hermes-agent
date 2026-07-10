@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import type { DesktopAuthProvider, DesktopCloudAgent, DesktopCloudOrg, DesktopConnectionProbeResult } from '@/global'
 import { useI18n } from '@/i18n'
 import { ExternalLink } from '@/lib/external-link'
@@ -41,46 +42,6 @@ const EMPTY_STATE: GatewaySettingsState = {
   remoteTokenSet: false,
   remoteUrl: '',
   cloudOrg: ''
-}
-
-function ModeCard({
-  active,
-  description,
-  disabled,
-  icon: Icon,
-  onSelect,
-  title
-}: {
-  active: boolean
-  description: string
-  disabled?: boolean
-  icon: typeof Monitor
-  onSelect: () => void
-  title: string
-}) {
-  return (
-    <button
-      className={cn(
-        'rounded-xl border p-3 text-left transition',
-        active
-          ? 'border-(--ui-stroke-secondary) bg-(--ui-bg-tertiary)'
-          : 'border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary) hover:bg-(--chrome-action-hover)',
-        disabled && 'cursor-not-allowed opacity-50'
-      )}
-      disabled={disabled}
-      onClick={onSelect}
-      type="button"
-    >
-      <div className="flex items-center gap-2 text-[length:var(--conversation-text-font-size)] font-medium">
-        <Icon className="size-4 text-muted-foreground" />
-        <span>{title}</span>
-        {active ? <Check className="ml-auto size-4 text-primary" /> : null}
-      </div>
-      <p className="mt-1.5 text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
-        {description}
-      </p>
-    </button>
-  )
 }
 
 function ScopeChip({ active, label, onSelect }: { active: boolean; label: string; onSelect: () => void }) {
@@ -742,30 +703,30 @@ export function GatewaySettings() {
         </div>
       ) : null}
 
-      <div className="grid gap-3 sm:grid-cols-3">
-        <ModeCard
-          active={state.mode === 'local'}
-          description={g.localDesc}
-          disabled={state.envOverride}
-          icon={Monitor}
-          onSelect={() => setState(current => ({ ...current, mode: 'local' }))}
-          title={g.localTitle}
-        />
-        <ModeCard
-          active={state.mode === 'cloud'}
-          description={g.cloudDesc}
-          disabled={state.envOverride}
-          icon={Cloud}
-          onSelect={() => setState(current => ({ ...current, mode: 'cloud' }))}
-          title={g.cloudTitle}
-        />
-        <ModeCard
-          active={state.mode === 'remote'}
-          description={g.remoteDesc}
-          disabled={state.envOverride}
-          icon={Globe}
-          onSelect={() => setState(current => ({ ...current, mode: 'remote' }))}
-          title={g.remoteTitle}
+      <div className="mb-5 grid gap-1">
+        <ListRow
+          action={
+            <SegmentedControl
+              className={state.envOverride ? 'pointer-events-none opacity-50' : undefined}
+              onChange={id => {
+                if (state.envOverride) {
+                  return
+                }
+
+                setState(current => ({ ...current, mode: id }))
+              }}
+              options={[
+                { id: 'local' as const, label: g.modeLocal, icon: Monitor },
+                { id: 'cloud' as const, label: g.modeCloud, icon: Cloud },
+                { id: 'remote' as const, label: g.modeRemote, icon: Globe }
+              ]}
+              value={state.mode}
+            />
+          }
+          description={
+            state.mode === 'local' ? g.localDesc : state.mode === 'cloud' ? g.cloudDesc : g.remoteDesc
+          }
+          title={g.modeTitle}
         />
       </div>
 
