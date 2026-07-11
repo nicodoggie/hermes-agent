@@ -1,10 +1,10 @@
-"""Helpers for rendering gateway message timestamps exactly once.
+"""Backward-compatible imports for gateway timestamp helpers.
 
-Gateway messages need timestamps in the LLM context for temporal awareness, but
-persisted message content should stay clean so replay does not accumulate
-``[timestamp] [timestamp] ...`` prefixes across turns.
+The implementation lives at the agent layer so every Hermes surface can render
+the same clean, timestamp-aware model context.
 """
 
+<<<<<<< HEAD
 from __future__ import annotations
 
 import re
@@ -106,3 +106,18 @@ def render_user_content_with_timestamp(content: str, ts_value: Any = None, tz=No
     clean_content, embedded_epoch = strip_leading_message_timestamps(content, tz=tz)
     prefix = format_message_timestamp(ts_value if embedded_epoch is None else embedded_epoch, tz=tz)
     return f"{prefix} {clean_content}" if prefix and clean_content else (prefix or clean_content)
+=======
+from agent.message_timestamps import (  # noqa: F401
+    coerce_message_timestamp,
+    format_message_timestamp,
+    render_user_content_with_timestamp,
+    strip_leading_message_timestamps,
+)
+
+__all__ = [
+    "coerce_message_timestamp",
+    "format_message_timestamp",
+    "render_user_content_with_timestamp",
+    "strip_leading_message_timestamps",
+]
+>>>>>>> 62f0e48de7 (feat(agent): add cross-surface message timestamps)

@@ -405,6 +405,7 @@ def _refresh_mcp_tools_between_turns(agent: Any) -> None:
         logger.debug("between-turns MCP tool refresh skipped", exc_info=True)
 
 
+<<<<<<< HEAD
 def _bind_turn_identity(
     agent: Any, task_id: Optional[str], stream_callback, persist_user_message: Any,
     persist_user_timestamp: Optional[float], persist_user_platform_id: Optional[str],
@@ -412,6 +413,35 @@ def _bind_turn_identity(
     """Stage callback/persist overrides on the agent and bind this turn's task and turn
     ids. Returns ``(effective_task_id, turn_id)``."""
     agent._stream_callback = stream_callback  # picked up by _interruptible_api_call
+=======
+    # Preserve clean input for transcripts before adding timestamp context.
+    original_user_message = (
+        persist_user_message if persist_user_message is not None else user_message
+    )
+    try:
+        from agent.message_timestamps import render_turn_with_message_timestamps
+        from hermes_cli.config import load_config
+        from hermes_time import get_timezone
+
+        conversation_history, user_message, rendered_timestamp = (
+            render_turn_with_message_timestamps(
+                conversation_history,
+                user_message,
+                config=load_config(),
+                current_timestamp=persist_user_timestamp,
+                tz=get_timezone(),
+            )
+        )
+        if rendered_timestamp is not None:
+            if persist_user_message is None:
+                persist_user_message = original_user_message
+            persist_user_timestamp = rendered_timestamp
+    except Exception:
+        logger.debug("message timestamp rendering skipped", exc_info=True)
+
+    # Store stream callback for _interruptible_api_call to pick up.
+    agent._stream_callback = stream_callback
+>>>>>>> 62f0e48de7 (feat(agent): add cross-surface message timestamps)
     agent._persist_user_message_idx = None
     agent._persist_user_message_override = persist_user_message
     agent._persist_user_message_timestamp = persist_user_timestamp
@@ -567,8 +597,32 @@ def _hydrate_from_history(agent: Any, conversation_history: Optional[List[Any]])
                 agent._turns_since_memory = prior_user_turns % agent._memory_nudge_interval
 
 
+<<<<<<< HEAD
 def _tick_memory_nudge(agent: Any) -> bool:
     """Advance the turn-based memory nudge counter; ``True`` when the review should fire."""
+=======
+    append_message(messages, user_msg)
+    current_turn_user_idx = len(messages) - 1
+    agent._persist_user_message_idx = current_turn_user_idx
+
+    # Track user turns for memory flush and periodic nudge logic.
+    agent._user_turn_count += 1
+    # Copilot x-initiator: the first API call of this user turn is
+    # user-initiated; tool-loop follow-ups revert to "agent" (#3040).
+    agent._is_user_initiated_turn = True
+
+    # Reset the streaming context scrubber at the top of each turn.
+    scrubber = getattr(agent, "_stream_context_scrubber", None)
+    if scrubber is not None:
+        scrubber.reset()
+    # Reset the think scrubber for the same reason.
+    think_scrubber = getattr(agent, "_stream_think_scrubber", None)
+    if think_scrubber is not None:
+        think_scrubber.reset()
+
+    # Track memory nudge trigger (turn-based, checked here).
+    should_review_memory = False
+>>>>>>> 62f0e48de7 (feat(agent): add cross-surface message timestamps)
     if (agent._memory_nudge_interval > 0
             and "memory" in agent.valid_tool_names
             and agent._memory_store):
