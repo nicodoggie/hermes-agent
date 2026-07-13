@@ -420,14 +420,14 @@ def _bind_turn_identity(
     )
     try:
         from agent.message_timestamps import render_turn_with_message_timestamps
-        from hermes_cli.config import load_config
+        from hermes_cli.config import load_config_readonly
         from hermes_time import get_timezone
 
         conversation_history, user_message, rendered_timestamp = (
             render_turn_with_message_timestamps(
                 conversation_history,
                 user_message,
-                config=load_config(),
+                config=load_config_readonly(),
                 current_timestamp=persist_user_timestamp,
                 tz=get_timezone(),
             )
