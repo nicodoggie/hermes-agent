@@ -43,6 +43,7 @@ class SlashCommandsMixin:
     # name -> (help text, advertised description, input hint)
     _COMMANDS: dict[str, tuple[str, str, str | None]] = {
         "help": ("Show available commands", "List available commands", None),
+        "fast": ("Show or change fast mode for this session", "Show or change fast mode for this session", "normal|fast|status"),
         "model": (
             "Show or change current model",
             "Show current model and provider, or switch models",
@@ -118,6 +119,30 @@ class SlashCommandsMixin:
         lines.extend(f"  /{cmd:10s}  {desc}" for cmd, (desc, _adv, _hint) in self._COMMANDS.items())
         lines.extend(["", "Unrecognized /commands are sent to the model as normal messages."])
         return "\n".join(lines)
+
+    def _cmd_fast(self, args: str, state: SessionState) -> str:
+        from acp_adapter.session import apply_fast_mode_to_agent
+        tokens = args.strip().lower().split()
+        if "--global" in tokens:
+            return "ACP /fast is session-scoped; change global defaults through Hermes config."
+        arg = " ".join(token for token in tokens if token != "--session")
+        if not arg or arg == "status":
+            status = "fast" if state.fast_mode else "normal"
+            return f"Fast mode: {status}\nUsage: /fast [normal|fast|status]"
+        if arg in {"fast", "on"}:
+            from hermes_cli.models import resolve_fast_mode_overrides
+            model = state.model or getattr(state.agent, "model", None)
+            if resolve_fast_mode_overrides(model) is None:
+                return "Fast mode is not available for the current model."
+            enabled = True
+        elif arg in {"normal", "off"}:
+            enabled = False
+        else:
+            return f"Unknown fast mode: {arg}\nUsage: /fast [normal|fast|status]"
+        state.fast_mode = enabled
+        apply_fast_mode_to_agent(state.agent, state.model, enabled)
+        self.session_manager.save_session(state.session_id)
+        return f"Fast mode: {"fast" if enabled else "normal"} (this session)"
 
     def _cmd_model(self, args: str, state: SessionState) -> str:
         if not args:
@@ -213,7 +238,10 @@ class SlashCommandsMixin:
         return "\n".join(lines)
 
     def _cmd_reset(self, args: str, state: SessionState) -> str:
+        from acp_adapter.session import apply_fast_mode_to_agent, configured_fast_mode
         state.history.clear()
+        state.fast_mode = configured_fast_mode()
+        apply_fast_mode_to_agent(state.agent, state.model, state.fast_mode)
         try:
             reset_session_state = getattr(state.agent, "reset_session_state", None)
             if callable(reset_session_state):
