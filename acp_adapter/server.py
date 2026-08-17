@@ -72,7 +72,13 @@ from acp_adapter.events import (
 )
 from acp_adapter.permissions import make_approval_callback
 from acp_adapter.provenance import session_provenance_meta
-from acp_adapter.session import SessionManager, SessionState, _expand_acp_enabled_toolsets
+from acp_adapter.session import (
+    SessionManager,
+    SessionState,
+    _expand_acp_enabled_toolsets,
+    apply_fast_mode_to_agent,
+    configured_fast_mode,
+)
 from acp_adapter.tools import build_tool_complete, build_tool_start
 from agent.context_compressor import (
     COMPRESSED_SUMMARY_METADATA_KEY,
@@ -601,6 +607,7 @@ class HermesACPAgent(acp.Agent):
     _SLASH_COMMANDS = {
         "help": "Show available commands",
         "model": "Show or change current model",
+        "fast": "Show or change fast mode for this session",
         "tools": "List available tools",
         "context": "Show conversation context info",
         "reset": "Clear conversation history",
@@ -619,6 +626,11 @@ class HermesACPAgent(acp.Agent):
             "name": "model",
             "description": "Show current model and provider, or switch models",
             "input_hint": "model name to switch to",
+        },
+        {
+            "name": "fast",
+            "description": "Show or change fast mode for this session",
+            "input_hint": "normal|fast|status",
         },
         {
             "name": "tools",
@@ -2334,6 +2346,7 @@ class HermesACPAgent(acp.Agent):
         handler = {
             "help": self._cmd_help,
             "model": self._cmd_model,
+            "fast": self._cmd_fast,
             "tools": self._cmd_tools,
             "context": self._cmd_context,
             "reset": self._cmd_reset,
@@ -2393,11 +2406,39 @@ class HermesACPAgent(acp.Agent):
             cwd=state.cwd,
             model=new_model,
             requested_provider=target_provider,
+            fast_mode=state.fast_mode,
         )
         self.session_manager.save_session(state.session_id)
         provider_label = getattr(state.agent, "provider", None) or target_provider or current_provider
         logger.info("Session %s: model switched to %s", state.session_id, new_model)
         return f"Model switched to: {new_model}\nProvider: {provider_label}"
+
+    def _cmd_fast(self, args: str, state: SessionState) -> str:
+        tokens = args.strip().lower().split()
+        if "--global" in tokens:
+            return "ACP /fast is session-scoped; change global defaults through Hermes config."
+        arg = " ".join(token for token in tokens if token != "--session")
+        if not arg or arg == "status":
+            status = "fast" if state.fast_mode else "normal"
+            return f"Fast mode: {status}\nUsage: /fast [normal|fast|status]"
+
+        if arg in {"fast", "on"}:
+            from hermes_cli.models import resolve_fast_mode_overrides
+
+            model = state.model or getattr(state.agent, "model", None)
+            if resolve_fast_mode_overrides(model) is None:
+                return "Fast mode is not available for the current model."
+            enabled = True
+        elif arg in {"normal", "off"}:
+            enabled = False
+        else:
+            return f"Unknown fast mode: {arg}\nUsage: /fast [normal|fast|status]"
+
+        state.fast_mode = enabled
+        apply_fast_mode_to_agent(state.agent, state.model, enabled)
+        self.session_manager.save_session(state.session_id)
+        status = "fast" if enabled else "normal"
+        return f"Fast mode: {status} (this session)"
 
     def _cmd_tools(self, args: str, state: SessionState) -> str:
         try:
@@ -2521,6 +2562,8 @@ class HermesACPAgent(acp.Agent):
 
     def _cmd_reset(self, args: str, state: SessionState) -> str:
         state.history.clear()
+        state.fast_mode = configured_fast_mode()
+        apply_fast_mode_to_agent(state.agent, state.model, state.fast_mode)
         reset_failed = False
         try:
             reset_session_state = getattr(state.agent, "reset_session_state", None)
@@ -2645,6 +2688,7 @@ class HermesACPAgent(acp.Agent):
                 requested_provider=requested_provider,
                 base_url=current_base_url,
                 api_mode=current_api_mode,
+                fast_mode=state.fast_mode,
             )
             self.session_manager.save_session(session_id)
             logger.info(
