@@ -640,13 +640,24 @@ class SessionEntry:
 
 
 def build_channel_continuity_note(entry: SessionEntry, source: SessionSource) -> Optional[str]:
-    """One-line continuity hint for long-lived Slack/Discord channels/threads.
+    """One-line continuity hint for long-lived Slack/Discord/Matrix channels/threads.
 
-    After an auto-reset the agent could bind a new request to an unrelated recent session; this
-    points it at the prior session in *this* channel (via ``session_search``). ``None`` unless the
-    platform is Slack/Discord, the auto-reset had real activity, and prev_session_id is set.
+    Slack, Discord, and Matrix rooms/threads are long-lived: when the daily/idle
+    reset policy starts a fresh session, the agent loses the thread's prior
+    context and can mistakenly bind a new request to an unrelated recent
+    session.  This deterministic one-line hint points the agent at the
+    specific prior session in *this* channel/thread so it recalls that
+    context via ``session_search`` before acting.
+
+    Returns ``None`` (and the caller adds nothing) unless **all** hold:
+      - the source platform is Slack, Discord, or Matrix,
+      - this session was created by an auto-reset that had real activity,
+      - the previous session_id was recorded on the entry.
+
+    No LLM calls, no extra API/DB lookups — the previous session id is
+    already known from :meth:`SessionStore.get_or_create_session`.
     """
-    if source.platform not in (Platform.SLACK, Platform.DISCORD):
+    if source.platform not in (Platform.SLACK, Platform.DISCORD, Platform.MATRIX):
         return None
     prev = entry.prev_session_id
     if not entry.reset_had_activity or not prev:
