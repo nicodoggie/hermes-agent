@@ -824,7 +824,7 @@ class SessionEntry:
     reset_had_activity: bool = False  # whether the expired session had any messages
 
     # When this session was created by an auto-reset, the session_id of the
-    # session it replaced.  Used to give Slack/Discord channels/threads a
+    # session it replaced.  Used to give Slack/Discord/Matrix rooms or threads a
     # lightweight continuity hint (see build_channel_continuity_note) so the
     # agent recalls the prior same-channel session via session_search instead
     # of binding the request to an unrelated recent session.
@@ -1017,9 +1017,9 @@ def build_channel_continuity_note(
     entry: "SessionEntry",
     source: SessionSource,
 ) -> Optional[str]:
-    """Build a lightweight session-continuity hint for Slack/Discord channels.
+    """Build a lightweight session-continuity hint for durable chat rooms.
 
-    Slack and Discord channels/threads are long-lived: when the daily/idle
+    Slack, Discord, and Matrix rooms/threads are long-lived: when the daily/idle
     reset policy starts a fresh session, the agent loses the thread's prior
     context and can mistakenly bind a new request to an unrelated recent
     session.  This deterministic one-line hint points the agent at the
@@ -1027,14 +1027,14 @@ def build_channel_continuity_note(
     context via ``session_search`` before acting.
 
     Returns ``None`` (and the caller adds nothing) unless **all** hold:
-      - the source platform is Slack or Discord,
+      - the source platform is Slack, Discord, or Matrix,
       - this session was created by an auto-reset that had real activity,
       - the previous session_id was recorded on the entry.
 
     No LLM calls, no extra API/DB lookups — the previous session id is
     already known from :meth:`SessionStore.get_or_create_session`.
     """
-    if source.platform not in (Platform.SLACK, Platform.DISCORD):
+    if source.platform not in (Platform.SLACK, Platform.DISCORD, Platform.MATRIX):
         return None
     if not getattr(entry, "reset_had_activity", False):
         return None

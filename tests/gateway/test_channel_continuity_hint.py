@@ -1,11 +1,12 @@
-"""Tests for the lightweight Slack/Discord channel session-continuity hint.
+"""Tests for the lightweight durable-room session-continuity hint.
 
 Salvaged from PR #36220 (metamon-p), ported onto the current SessionStore.
+Matrix parity follows the continuity portion of PR #70972 (joelbrilliant).
 
 Covers:
 - SessionStore records the previous session_id on auto-reset (and only then).
 - prev_session_id survives a to_dict() → from_dict() roundtrip (gateway restart).
-- build_channel_continuity_note() emits a hint only for Slack/Discord sessions
+- build_channel_continuity_note() emits a hint only for Slack/Discord/Matrix sessions
   that were auto-reset with real prior activity, and stays silent otherwise.
 """
 
@@ -45,6 +46,15 @@ def _slack_source(thread_id=None):
         chat_type="thread" if thread_id else "channel",
         user_id="U1",
         thread_id=thread_id,
+    )
+
+
+def _matrix_source():
+    return SessionSource(
+        platform=Platform.MATRIX,
+        chat_id="!family:example.test",
+        chat_type="channel",
+        user_id="@nico:example.test",
     )
 
 
@@ -97,6 +107,14 @@ class TestBuildChannelContinuityNote:
         assert entry.prev_session_id in note
         assert "channel" in note
 
+    def test_matrix_room_emits_hint(self):
+        entry = _reset_entry(Platform.MATRIX)
+        note = build_channel_continuity_note(entry, _matrix_source())
+        assert note is not None
+        assert entry.prev_session_id is not None
+        assert "session_search" in note
+        assert entry.prev_session_id in note
+        assert "channel" in note
 
     def test_no_activity_returns_none(self):
         entry = _reset_entry(Platform.SLACK, had_activity=False)
