@@ -493,15 +493,22 @@ class SessionEntry:
     # Created because the previous session expired; consumed once to inject a notice.
     was_auto_reset: bool = False
     auto_reset_reason: Optional[str] = None  # "idle" or "daily"
-    reset_had_activity: bool = False  # the expired session had messages
-    prev_session_id: Optional[str] = None  # replaced by auto-reset; feeds the continuity note
-    # Explicit /new or /reset; consumed once to re-inject topic/channel skills. Distinct from
-    # was_auto_reset, whose "expired due to inactivity" notice is wrong for a manual reset.
-    # Set by reset_session() when the user explicitly sends /new or /reset. Consumed once by
-    # _handle_message_with_agent to trigger topic/channel skill re-injection on the first message of the new
-    # session. We can't reuse was_auto_reset for this because that flag fires the "session expired due to
-    # inactivity" user-facing notice and a misleading context-note prepend — both wrong for an explicit
-    # manual reset. See issue #6508.
+    reset_had_activity: bool = False  # whether the expired session had any messages
+
+    # When this session was created by an auto-reset, the session_id of the
+    # session it replaced.  Used to give Slack/Discord/Matrix rooms or threads a
+    # lightweight continuity hint (see build_channel_continuity_note) so the
+    # agent recalls the prior same-channel session via session_search instead
+    # of binding the request to an unrelated recent session.
+    prev_session_id: Optional[str] = None
+
+    # Set by reset_session() when the user explicitly sends /new or /reset.
+    # Consumed once by _handle_message_with_agent to trigger topic/channel
+    # skill re-injection on the first message of the new session.  We can't
+    # reuse was_auto_reset for this because that flag fires the "session
+    # expired due to inactivity" user-facing notice and a misleading
+    # context-note prepend — both wrong for an explicit manual reset.
+    # See issue #6508.
     is_fresh_reset: bool = False
     # Set by the expiry watcher after finalizing; persisted so restarts don't re-run finalization.
     expiry_finalized: bool = False
@@ -597,14 +604,28 @@ class SessionEntry:
         )
 
 
-def build_channel_continuity_note(entry: "SessionEntry", source: SessionSource) -> Optional[str]:
-    """One-line continuity hint for long-lived Slack/Discord channels/threads.
+def build_channel_continuity_note(
+    entry: "SessionEntry",
+    source: SessionSource,
+) -> Optional[str]:
+    """Build a lightweight session-continuity hint for durable chat rooms.
 
-    After an auto-reset the agent could bind a new request to an unrelated recent session; this
-    points it at the prior session in *this* channel (via ``session_search``). ``None`` unless the
-    platform is Slack/Discord, the auto-reset had real activity, and prev_session_id is set.
+    Slack, Discord, and Matrix rooms/threads are long-lived: when the daily/idle
+    reset policy starts a fresh session, the agent loses the thread's prior
+    context and can mistakenly bind a new request to an unrelated recent
+    session.  This deterministic one-line hint points the agent at the
+    specific prior session in *this* channel/thread so it recalls that
+    context via ``session_search`` before acting.
+
+    Returns ``None`` (and the caller adds nothing) unless **all** hold:
+      - the source platform is Slack, Discord, or Matrix,
+      - this session was created by an auto-reset that had real activity,
+      - the previous session_id was recorded on the entry.
+
+    No LLM calls, no extra API/DB lookups — the previous session id is
+    already known from :meth:`SessionStore.get_or_create_session`.
     """
-    if source.platform not in (Platform.SLACK, Platform.DISCORD):
+    if source.platform not in (Platform.SLACK, Platform.DISCORD, Platform.MATRIX):
         return None
     prev = entry.prev_session_id
     if not entry.reset_had_activity or not prev:
