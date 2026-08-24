@@ -87,8 +87,8 @@ def test_matrix_peer_yaml_reaches_runtime_adapter(monkeypatch, tmp_path):
     (tmp_path / "config.yaml").write_text(
         "matrix:\n"
         "  peer_agent_ids:\n"
-        "    - '@ran:example.org'\n"
-        "    - '@yomi:example.org'\n"
+        "    - '@agent-a:example.org'\n"
+        "    - '@agent-b:example.org'\n"
         "  peer_reply_budget_per_human_message: 2\n",
         encoding="utf-8",
     )
@@ -100,8 +100,8 @@ def test_matrix_peer_yaml_reaches_runtime_adapter(monkeypatch, tmp_path):
     adapter = MatrixAdapter(config.platforms[Platform.MATRIX])
 
     assert adapter._peer_agent_ids == {
-        "@ran:example.org",
-        "@yomi:example.org",
+        "@agent-a:example.org",
+        "@agent-b:example.org",
     }
     assert adapter._peer_reply_budget_per_human_message == 2
 

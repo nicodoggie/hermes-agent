@@ -122,28 +122,28 @@ class TestPeerAgentBudgetConfig:
     def test_parses_peer_ids_from_list(self):
         adapter = _make_adapter(
             extra={
-                "peer_agent_ids": ["@ran:example.org", " @yomi:example.org "],
+                "peer_agent_ids": ["@agent-a:example.org", " @agent-b:example.org "],
                 "peer_reply_budget_per_human_message": 2,
             }
         )
 
         assert adapter._peer_agent_ids == {
-            "@ran:example.org",
-            "@yomi:example.org",
+            "@agent-a:example.org",
+            "@agent-b:example.org",
         }
         assert adapter._peer_reply_budget_per_human_message == 2
 
     def test_parses_peer_ids_from_comma_string(self):
         adapter = _make_adapter(
             extra={
-                "peer_agent_ids": "@ran:example.org, @yomi:example.org",
+                "peer_agent_ids": "@agent-a:example.org, @agent-b:example.org",
                 "peer_reply_budget_per_human_message": "3",
             }
         )
 
         assert adapter._peer_agent_ids == {
-            "@ran:example.org",
-            "@yomi:example.org",
+            "@agent-a:example.org",
+            "@agent-b:example.org",
         }
         assert adapter._peer_reply_budget_per_human_message == 3
 
@@ -151,7 +151,7 @@ class TestPeerAgentBudgetConfig:
     def test_invalid_budget_fails_closed(self, value):
         adapter = _make_adapter(
             extra={
-                "peer_agent_ids": ["@yomi:example.org"],
+                "peer_agent_ids": ["@agent-b:example.org"],
                 "peer_reply_budget_per_human_message": value,
             }
         )
@@ -164,7 +164,7 @@ class TestPeerAgentBudgetGating:
     def _adapter(monkeypatch, *, require_mention=False):
         monkeypatch.setenv(
             "MATRIX_ALLOWED_USERS",
-            "@alice:example.org,@hermes:example.org,@yomi:example.org",
+            "@alice:example.org,@hermes:example.org,@agent-b:example.org",
         )
         monkeypatch.setenv(
             "MATRIX_REQUIRE_MENTION", str(require_mention).lower()
@@ -172,7 +172,7 @@ class TestPeerAgentBudgetGating:
         monkeypatch.setenv("MATRIX_AUTO_THREAD", "false")
         return _make_adapter(
             extra={
-                "peer_agent_ids": ["@yomi:example.org"],
+                "peer_agent_ids": ["@agent-b:example.org"],
                 "peer_reply_budget_per_human_message": 2,
             }
         )
@@ -217,7 +217,7 @@ class TestPeerAgentBudgetGating:
         adapter._peer_reply_budget_remaining["!room1:example.org"] = 2
 
         await adapter._on_room_message(
-            _make_event("hello sister", sender="@yomi:example.org")
+            _make_event("hello peer", sender="@agent-b:example.org")
         )
 
         adapter.handle_message.assert_not_awaited()
@@ -229,8 +229,8 @@ class TestPeerAgentBudgetGating:
 
         await adapter._on_room_message(
             _make_event(
-                "@hermes:example.org hello sister",
-                sender="@yomi:example.org",
+                "@hermes:example.org hello peer",
+                sender="@agent-b:example.org",
             )
         )
 
@@ -251,7 +251,7 @@ class TestPeerAgentBudgetGating:
             await adapter._on_room_message(
                 _make_event(
                     "@hermes:example.org continue",
-                    sender="@yomi:example.org",
+                    sender="@agent-b:example.org",
                     event_id=f"$peer{index}",
                 )
             )
@@ -273,7 +273,7 @@ class TestPeerAgentBudgetGating:
         await adapter._on_room_message(
             _make_event(
                 "@hermes:example.org your turn",
-                sender="@yomi:example.org",
+                sender="@agent-b:example.org",
                 event_id="$peer-next",
             )
         )
@@ -287,7 +287,7 @@ class TestPeerAgentBudgetGating:
         adapter._peer_reply_budget_remaining["!room1:example.org"] = 2
 
         await adapter._on_room_message(
-            _make_event("/status", sender="@yomi:example.org")
+            _make_event("/status", sender="@agent-b:example.org")
         )
 
         adapter.handle_message.assert_not_awaited()
