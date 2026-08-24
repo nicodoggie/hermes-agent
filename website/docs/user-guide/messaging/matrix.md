@@ -142,10 +142,10 @@ matrix:
   require_mention: false
   allowed_users:
     - "@alice:matrix.org"
-    - "@ran:matrix.org"
-    - "@yomi:matrix.org"
+    - "@agent-a:matrix.org"
+    - "@agent-b:matrix.org"
   peer_agent_ids:
-    - "@yomi:matrix.org"  # Ran's profile; Yomi lists Ran instead
+    - "@agent-b:matrix.org"  # Agent A's profile; Agent B lists Agent A instead
   peer_reply_budget_per_human_message: 2
 ```
 
