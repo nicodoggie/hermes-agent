@@ -173,7 +173,7 @@ def test_acp_model_switch_preserves_fast_mode(monkeypatch):
     assert state.agent.request_overrides == {"service_tier": "priority"}
 
 
-def test_acp_reset_restores_configured_fast_mode(monkeypatch):
+def test_acp_reset_preserves_session_fast_mode(monkeypatch):
     acp_agent, state, fake, _conn = make_agent_and_state()
     state.model = fake.model = "gpt-5.4"
     state.fast_mode = True
@@ -183,9 +183,9 @@ def test_acp_reset_restores_configured_fast_mode(monkeypatch):
 
     acp_agent._cmd_reset("", state)
 
-    assert state.fast_mode is False
-    assert fake.service_tier is None
-    assert fake.request_overrides is None
+    assert state.fast_mode is True
+    assert fake.service_tier == "priority"
+    assert fake.request_overrides == {"service_tier": "priority"}
 
 
 @pytest.mark.asyncio
