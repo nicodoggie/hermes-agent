@@ -52,9 +52,9 @@ def _slack_source(thread_id=None):
 def _matrix_source():
     return SessionSource(
         platform=Platform.MATRIX,
-        chat_id="!family:example.test",
+        chat_id="!room:example.test",
         chat_type="channel",
-        user_id="@nico:example.test",
+        user_id="@user:example.test",
     )
 
 
