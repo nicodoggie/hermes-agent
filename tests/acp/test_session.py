@@ -186,12 +186,12 @@ class TestCreateSession:
             request_overrides={"custom": "kept"},
         )
 
-        acp_session.apply_fast_mode_to_agent(agent, "claude-opus-4-6", True)
+        acp_session.apply_fast_mode_to_agent(agent, "claude-opus-4-8", True)
         assert agent.service_tier is None
         assert agent.request_overrides == {"custom": "kept", "speed": "fast"}
         assert acp_session._agent_fast_mode_enabled(agent) is True
 
-        acp_session.apply_fast_mode_to_agent(agent, "claude-opus-4-6", False)
+        acp_session.apply_fast_mode_to_agent(agent, "claude-opus-4-8", False)
         assert agent.service_tier is None
         assert agent.request_overrides == {"custom": "kept"}
 

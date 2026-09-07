@@ -2013,7 +2013,7 @@ class MatrixAdapter(BasePlatformAdapter):
             if self._peer_agent_ids:
                 if is_peer_agent_message:
                     self._peer_reply_budget_remaining[room_id] -= 1
-                elif sender in self._allowed_user_ids:
+                elif self._is_authorized_user(sender):
                     self._peer_reply_budget_remaining[room_id] = (
                         self._peer_reply_budget_per_human_message
                     )

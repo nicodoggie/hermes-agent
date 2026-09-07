@@ -33,7 +33,7 @@ from acp_adapter.events import (
 from acp_adapter.model_catalog import build_model_state, encode_model_choice
 from acp_adapter.permissions import make_approval_callback
 from acp_adapter.provenance import session_provenance_meta
-from acp_adapter.session import SessionManager, SessionState, _expand_acp_enabled_toolsets
+from acp_adapter.session import SessionManager, SessionState, _expand_acp_enabled_toolsets, configured_fast_mode
 from acp_adapter.tools import build_tool_complete, build_tool_start, coerce_tool_args
 from agent.context_compressor import (COMPRESSED_SUMMARY_METADATA_KEY, ContextCompressor)
 from agent.interrupt_compat import request_hard_interrupt
@@ -336,7 +336,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             }
         state.agent = self.session_manager._make_agent(
             session_id=state.session_id, cwd=state.cwd, model=new_model,
-            requested_provider=target_provider, **endpoint,
+            requested_provider=target_provider, fast_mode=state.fast_mode, **endpoint,
         )
         self.session_manager.save_session(state.session_id)
         return current_provider, target_provider, new_model

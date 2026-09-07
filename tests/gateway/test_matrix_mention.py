@@ -189,6 +189,26 @@ class TestPeerAgentBudgetGating:
         assert adapter._peer_reply_budget_remaining["!room1:example.org"] == 2
 
     @pytest.mark.asyncio
+    async def test_empty_allowlist_with_allow_all_resets_budget(self, monkeypatch):
+        monkeypatch.setenv("MATRIX_ALLOWED_USERS", "")
+        monkeypatch.setenv("GATEWAY_ALLOW_ALL_USERS", "true")
+        monkeypatch.setenv("MATRIX_REQUIRE_MENTION", "false")
+        monkeypatch.setenv("MATRIX_AUTO_THREAD", "false")
+        adapter = _make_adapter(extra={
+            "peer_agent_ids": ["@agent-b:example.org"],
+            "peer_reply_budget_per_human_message": 2,
+        })
+        assert adapter._allowed_user_ids == set()
+        adapter._peer_reply_budget_remaining["!room1:example.org"] = 0
+
+        await adapter._on_room_message(
+            _make_event("hello everyone", sender="@alice:example.org", event_id="$allow-all")
+        )
+
+        adapter.handle_message.assert_awaited_once()
+        assert adapter._peer_reply_budget_remaining["!room1:example.org"] == 2
+
+    @pytest.mark.asyncio
     async def test_rejected_untagged_human_does_not_reset_budget(self, monkeypatch):
         adapter = self._adapter(monkeypatch, require_mention=True)
         adapter._peer_reply_budget_remaining["!room1:example.org"] = 0

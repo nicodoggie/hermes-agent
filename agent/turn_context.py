@@ -405,28 +405,6 @@ def _refresh_mcp_tools_between_turns(agent: Any) -> None:
         logger.debug("between-turns MCP tool refresh skipped", exc_info=True)
 
 
-    # Store stream callback for _interruptible_api_call to pick up.
-    agent._stream_callback = stream_callback
-    agent._persist_user_message_idx = None
-    agent._persist_user_message_override = persist_user_message
-    agent._persist_user_message_timestamp = persist_user_timestamp
-    agent._persist_user_message_platform_id = persist_user_platform_id
-    # Unique task_id when not provided isolates VMs between tasks.
-    effective_task_id = task_id or str(uuid.uuid4())
-    agent._current_task_id = effective_task_id
-    turn_id = str(getattr(agent, "_relay_pending_turn_id", "") or "") or (
-        f"{agent.session_id or 'session'}:{effective_task_id}:{uuid.uuid4().hex[:8]}"
-    )
-    agent._relay_pending_turn_id = None
-    agent._current_turn_id = turn_id
-    agent._current_api_request_id = ""
-    # Tripwire: warn when this turn starts before the previous turn-end persist
-    # (concurrent turns interleave transcript writes). Cleared in _persist_session.
-    from agent.agent_runtime_helpers import note_turn_start
-    note_turn_start(agent, turn_id)
-    return effective_task_id, turn_id
-
-
 def _bind_turn_identity(
     agent: Any, task_id: Optional[str], stream_callback, persist_user_message: Any,
     persist_user_timestamp: Optional[float], persist_user_platform_id: Optional[str],
