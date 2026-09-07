@@ -134,6 +134,49 @@ def backend_display_stale(recorded: str, current: str) -> bool:
     return (recorded or "") != (current or "")
 
 
+def _recover_linux_xauthority(env: dict[str, str]) -> None:
+    """Recover a matching desktop XWayland cookie path for detached hosts.
+
+    Desktop sessions may export ``XAUTHORITY`` only to the user systemd
+    environment, while a TUI or gateway inherits the display and session bus
+    without it.  Recover only the path, never override an explicit value, and
+    require systemd's ``DISPLAY`` to match so a cookie for another display is
+    not adopted.
+    """
+    if (
+        sys.platform != "linux"
+        or env.get("XAUTHORITY")
+        or not env.get("DISPLAY")
+        or not env.get("WAYLAND_DISPLAY")
+        or not env.get("DBUS_SESSION_BUS_ADDRESS")
+    ):
+        return
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "show-environment"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            env=env,
+            creationflags=windows_hide_flags(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    if result.returncode != 0:
+        return
+    session_env = {}
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            session_env[key] = value.strip()
+    if session_env.get("DISPLAY") != env["DISPLAY"]:
+        return
+    value = session_env.get("XAUTHORITY")
+    if value and os.path.isfile(value):
+        env["XAUTHORITY"] = value
+
 def cua_driver_child_env(base_env: Optional[dict[str, str]] = None) -> dict[str, str]:
     """Env for spawning cua-driver: ``base_env`` (default ``os.environ``) plus ``CUA_DRIVER_RS_TELEMETRY_ENABLED=0``
     unless the user opted in, plus the native-Wayland bridge (``computer_use.native_wayland`` config opt-in, only when
@@ -144,6 +187,7 @@ def cua_driver_child_env(base_env: Optional[dict[str, str]] = None) -> dict[str,
     # cua-driver never acts on a seat the human is sitting at (#90374 class) and headless hosts get a display.
     from tools.bot_desktop.runtime import desktop_env as _bot_desktop_env
     env = _bot_desktop_env(env)
+    _recover_linux_xauthority(env)
     if _cua_telemetry_disabled():
         env[_CUA_TELEMETRY_ENV_VAR] = "0"
     if sys.platform == "linux" and env.get("WAYLAND_DISPLAY") and bool(_computer_use_cfg().get("native_wayland", False)):
