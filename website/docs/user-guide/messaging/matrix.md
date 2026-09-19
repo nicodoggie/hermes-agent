@@ -100,6 +100,12 @@ matrix:
   peer_require_mention: true      # Require mentions from configured peers (default: true)
   peer_require_mention: true
   peer_reply_budget_per_human_message: 2  # Peer-triggered calls opened by each authorized human message
+  peer_message_buffer:
+    enabled: false                 # Opt in to durable gated-peer retention
+    auto_clear: false              # Explicit matrix_ack_peer_messages is the normal removal path
+    max_count: 100                 # Newest messages retained per room
+    max_bytes: 262144              # UTF-8 bytes retained per room
+    max_message_bytes: 16384       # Oversized messages are UTF-8 safely truncated with a marker
   ignore_user_patterns:           # Bridge/appservice ghost users to ignore
     - "^@telegram_"
     - "^@whatsapp_"
@@ -174,6 +180,18 @@ With peer-agent gating enabled:
   before model invocation; and
 - a gateway restart begins with no peer allowance until an authorized human
   sends a new message.
+
+When `peer_message_buffer.enabled` is true, authorized peer messages rejected by
+the mention gate or exhausted budget are retained in a profile-scoped SQLite
+store. The next permitted turn receives the retained messages oldest-to-newest
+with sender, timestamp, event ID, and an omission notice when retention evicted
+older entries. Retained messages are quoted data and are not re-parsed as
+commands. Reading/delivery does not remove them; the model may call
+`matrix_ack_peer_messages` with the exact delivered event IDs. The tool is
+limited to the current Matrix profile and room, is idempotent, and concurrent
+new arrivals remain pending. `auto_clear` is reserved for a future turn-lifecycle
+integration and defaults off, so a restart or failed turn cannot lose pending
+messages.
 
 Hermes tells agents in Matrix shared rooms that they may return exactly
 `NO_REPLY` on unaddressed room messages when they have nothing useful, warm, or

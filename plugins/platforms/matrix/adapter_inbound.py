@@ -52,6 +52,7 @@ class MatrixInboundMixin:
 
     def _admit_peer_room_message(
         self, source: SessionSource, is_mentioned: bool,
+        event_id: str, body: str, source_content: dict,
     ) -> bool:
         """Charge only authorized, directly mentioned peers after the ordinary inference gates."""
         if not self._peer_agent_ids:
@@ -63,10 +64,14 @@ class MatrixInboundMixin:
             if authorized:
                 self._peer_reply_budget_remaining[room_id] = self._peer_reply_budget_per_human_message
             return True
-        if not authorized or (self._peer_require_mention and not is_mentioned):
+        if not authorized:
+            return False
+        if self._peer_require_mention and not is_mentioned:
+            self._buffer_peer_message(room_id, sender, event_id, body, source_content)
             return False
         remaining = self._peer_reply_budget_remaining.get(room_id, 0)
         if remaining <= 0:
+            self._buffer_peer_message(room_id, sender, event_id, body, source_content)
             logger.info("Matrix: ignoring peer-agent message from %s in %s — reply budget exhausted", sender, room_id)
             return False
         self._peer_reply_budget_remaining[room_id] = remaining - 1
@@ -138,7 +143,7 @@ class MatrixInboundMixin:
             user_name=display_name, thread_id=thread_id, chat_topic=identity.room_topic,
             guild_id=identity.server_name, parent_chat_id=room_id if thread_id else None, message_id=event_id)
         # Authorize the actual event source: every route discriminator and transport owner travels with it.
-        if not is_dm and not self._admit_peer_room_message(source, is_mentioned):
+        if not is_dm and not self._admit_peer_room_message(source, is_mentioned, event_id, body, source_content):
             return None
         if voice_gate is not None:  # decided (parked or passing): don't hold bare mentions any longer
             self._parked_voices.release(room_id, sender, voice_gate)
