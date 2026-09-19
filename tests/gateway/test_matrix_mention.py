@@ -281,6 +281,48 @@ class TestPeerAgentBudgetGating:
         assert adapter._peer_reply_budget_remaining["!room1:example.org"] == 0
 
     @pytest.mark.asyncio
+    async def test_untagged_trusted_peer_with_exhausted_budget_is_dropped(
+        self, monkeypatch
+    ):
+        adapter = self._adapter(
+            monkeypatch, require_mention=True, peer_require_mention=False
+        )
+        adapter._peer_reply_budget_remaining["!room1:example.org"] = 0
+
+        await adapter._on_room_message(
+            _make_event("continue the discussion", sender="@yomi:example.org")
+        )
+
+        adapter.handle_message.assert_not_awaited()
+        assert adapter._peer_reply_budget_remaining["!room1:example.org"] == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("sender", "room_id", "allowed_rooms"),
+        [
+            ("@mallory:example.org", "!room1:example.org", None),
+            ("@yomi:example.org", "!room2:example.org", "!room1:example.org"),
+        ],
+        ids=["unauthorized-sender", "disallowed-room"],
+    )
+    async def test_peer_bypass_does_not_skip_authorization_gates(
+        self, monkeypatch, sender, room_id, allowed_rooms
+    ):
+        adapter = self._adapter(
+            monkeypatch, require_mention=True, peer_require_mention=False
+        )
+        if allowed_rooms is not None:
+            monkeypatch.setenv("MATRIX_ALLOWED_ROOMS", allowed_rooms)
+            adapter._allowed_rooms = {allowed_rooms}
+            adapter._allowed_room_ids = {allowed_rooms}
+
+        await adapter._on_room_message(
+            _make_event("continue the discussion", sender=sender, room_id=room_id)
+        )
+
+        adapter.handle_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_untagged_peer_is_dropped_without_consuming_budget(self, monkeypatch):
         adapter = self._adapter(monkeypatch)
         adapter._peer_reply_budget_remaining["!room1:example.org"] = 2

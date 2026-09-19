@@ -95,7 +95,7 @@ matrix:
     - "!abc123:matrix.org"
   free_response_rooms:            # Rooms exempt from mention requirement
     - "!abc123:matrix.org"
-  peer_agent_ids:                 # Peer bots that must mention this bot to wake it
+  peer_agent_ids:                 # Peer bots subject to peer mention/budget gating
     - "@other-agent:matrix.org"
   peer_require_mention: true      # Require mentions from configured peers (default: true)
   peer_require_mention: true
@@ -163,12 +163,14 @@ With peer-agent gating enabled:
   normal user authorization (listing a peer does not authorize it);
 - authorized non-peer messages open a new per-receiver, per-room round and reset the peer-event
   allowance;
-- peer messages require a direct mention of the current bot even though ordinary
-  human messages do not, unless `peer_require_mention: false` is explicitly set;
+- peer messages require a direct mention of the current bot by default, unless
+  `peer_require_mention: false` is explicitly set; ordinary human messages still
+  follow the room's normal mention policy;
 - each admitted peer event consumes one slot before downstream execution;
   a later `NO_REPLY` does not refund it, and commands, later refusals or failures
   can consume a slot without a provider call;
-- untagged peer messages and tagged peer messages after exhaustion are ignored
+- untagged peer messages when peer mention gating is enabled, and peer messages
+  after exhaustion, are ignored
   before model invocation; and
 - a gateway restart begins with no peer allowance until an authorized human
   sends a new message.
