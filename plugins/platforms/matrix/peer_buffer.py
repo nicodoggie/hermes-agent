@@ -1,6 +1,8 @@
 """Durable, profile-scoped buffering for Matrix peer messages."""
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,16 +20,19 @@ class PeerBufferConfig:
     @classmethod
     def from_mapping(cls, raw: object) -> PeerBufferConfig:
         data = raw if isinstance(raw, dict) else {}
+
         def boolean(name: str, default: bool) -> bool:
             value = data.get(name, default)
             if isinstance(value, str):
                 return value.strip().lower() not in {"false", "0", "no", "off"}
             return bool(value)
+
         def integer(name: str, default: int, minimum: int = 1) -> int:
             try:
                 return max(minimum, int(data.get(name, default)))
             except (TypeError, ValueError):
                 return default
+
         return cls(
             enabled=boolean("enabled", False),
             auto_clear=boolean("auto_clear", False),
@@ -46,27 +51,34 @@ class MatrixPeerBuffer:
         if config.enabled:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             with self._connect() as db:
-                db.executescript("""
+                db.executescript(
+                    """
                     PRAGMA journal_mode=WAL;
                     CREATE TABLE IF NOT EXISTS peer_messages (
-                        room_id TEXT NOT NULL,
-                        event_id TEXT NOT NULL,
-                        sender TEXT NOT NULL,
-                        timestamp REAL NOT NULL,
-                        body TEXT NOT NULL,
-                        body_bytes INTEGER NOT NULL,
+                        room_id TEXT NOT NULL, event_id TEXT NOT NULL, sender TEXT NOT NULL,
+                        timestamp REAL NOT NULL, body TEXT NOT NULL, body_bytes INTEGER NOT NULL,
+                        delivered INTEGER NOT NULL DEFAULT 0,
                         PRIMARY KEY (room_id, event_id)
                     );
                     CREATE TABLE IF NOT EXISTS peer_buffer_meta (
-                        room_id TEXT PRIMARY KEY,
-                        omitted_count INTEGER NOT NULL DEFAULT 0
+                        room_id TEXT PRIMARY KEY, omitted_count INTEGER NOT NULL DEFAULT 0,
+                        delivered_omitted_count INTEGER NOT NULL DEFAULT 0
                     );
-                    CREATE TABLE IF NOT EXISTS peer_message_acks (
-                        room_id TEXT NOT NULL,
-                        event_id TEXT NOT NULL,
-                        PRIMARY KEY (room_id, event_id)
+                    CREATE TABLE IF NOT EXISTS peer_batches (
+                        batch_id TEXT PRIMARY KEY, room_id TEXT NOT NULL,
+                        event_ids TEXT NOT NULL, omitted_count INTEGER NOT NULL,
+                        state TEXT NOT NULL CHECK(state IN ('in_flight', 'delivered', 'acknowledged'))
                     );
-                """)
+                    """
+                )
+                columns = {row[1] for row in db.execute("PRAGMA table_info(peer_messages)")}
+                if "delivered" not in columns:
+                    db.execute("ALTER TABLE peer_messages ADD COLUMN delivered INTEGER NOT NULL DEFAULT 0")
+                meta_columns = {row[1] for row in db.execute("PRAGMA table_info(peer_buffer_meta)")}
+                if "delivered_omitted_count" not in meta_columns:
+                    db.execute(
+                        "ALTER TABLE peer_buffer_meta ADD COLUMN delivered_omitted_count INTEGER NOT NULL DEFAULT 0"
+                    )
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.db_path, timeout=10)
@@ -78,16 +90,23 @@ class MatrixPeerBuffer:
             return False
         raw = str(body)
         encoded = raw.encode("utf-8")
-        cap = self.config.max_message_bytes
-        if len(encoded) > cap:
-            encoded = encoded[:cap]
+        if len(encoded) > self.config.max_message_bytes:
+            cap = self.config.max_message_bytes
+            marker = "… [message truncated]".encode()
+            prefix = encoded[: max(0, cap - len(marker))]
+            while True:
+                try:
+                    prefix_text = prefix.decode("utf-8")
+                    break
+                except UnicodeDecodeError:
+                    prefix = prefix[:-1]
+            encoded = (prefix_text.encode("utf-8") + marker)[:cap]
             while True:
                 try:
                     body = encoded.decode("utf-8")
                     break
                 except UnicodeDecodeError:
                     encoded = encoded[:-1]
-            body += "… [message truncated]"
             encoded = body.encode("utf-8")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -112,7 +131,10 @@ class MatrixPeerBuffer:
                 total -= int(row["body_bytes"])
                 evicted += 1
             if evicted:
-                db.execute("UPDATE peer_buffer_meta SET omitted_count=omitted_count+? WHERE room_id=?", (evicted, room_id))
+                db.execute(
+                    "UPDATE peer_buffer_meta SET omitted_count=omitted_count+? WHERE room_id=?",
+                    (evicted, room_id),
+                )
             db.commit()
         return True
 
@@ -124,32 +146,122 @@ class MatrixPeerBuffer:
                 "SELECT room_id,event_id,sender,timestamp,body FROM peer_messages "
                 "WHERE room_id=? ORDER BY timestamp,event_id", (room_id,)
             ).fetchall()
-            meta = db.execute("SELECT omitted_count FROM peer_buffer_meta WHERE room_id=?", (room_id,)).fetchone()
-        return {"messages": [dict(row) for row in rows], "omitted_count": int(meta[0]) if meta else 0}
+            meta = db.execute(
+                "SELECT omitted_count,delivered_omitted_count FROM peer_buffer_meta WHERE room_id=?", (room_id,)
+            ).fetchone()
+        return {
+            "messages": [dict(row) for row in rows],
+            "omitted_count": int(meta[0]) if meta else 0,
+            "delivered_omitted_count": int(meta[1]) if meta else 0,
+        }
 
-    def acknowledge(self, *, room_id: str, event_ids: Iterable[str]) -> int:
-        if not self.config.enabled or not room_id:
-            return 0
-        ids = list(dict.fromkeys(str(value) for value in event_ids if str(value)))
-        if not ids:
-            return 0
+    def prepare_batch(self, room_id: str) -> dict | None:
+        """Return one durable batch of not-yet-successfully-delivered data."""
+        if not self.config.enabled:
+            return None
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            placeholders = ",".join("?" for _ in ids)
-            foreign = db.execute(
-                f"SELECT event_id FROM peer_messages WHERE event_id IN ({placeholders}) AND room_id != ?",
-                (*ids, room_id),
+            existing = db.execute(
+                "SELECT batch_id,event_ids,omitted_count FROM peer_batches "
+                "WHERE room_id=? AND state='in_flight' ORDER BY rowid DESC LIMIT 1", (room_id,)
             ).fetchone()
-            if foreign:
-                raise ValueError("event_ids are scoped to another Matrix room")
-            count = db.execute(
-                f"SELECT count(*) FROM peer_messages WHERE room_id=? AND event_id IN ({placeholders})",
-                (room_id, *ids),
-            ).fetchone()[0]
-            db.executemany(
-                "INSERT OR IGNORE INTO peer_message_acks(room_id,event_id) VALUES (?,?)",
-                ((room_id, event_id) for event_id in ids),
+            if existing:
+                return {
+                    "batch_id": existing["batch_id"],
+                    "event_ids": json.loads(existing["event_ids"]),
+                    "omitted_count": int(existing["omitted_count"]),
+                }
+            rows = db.execute(
+                "SELECT event_id FROM peer_messages WHERE room_id=? AND delivered=0 ORDER BY timestamp,event_id",
+                (room_id,),
+            ).fetchall()
+            meta = db.execute(
+                "SELECT omitted_count,delivered_omitted_count FROM peer_buffer_meta WHERE room_id=?", (room_id,)
+            ).fetchone()
+            omitted = max(0, int(meta[0]) - int(meta[1])) if meta else 0
+            event_ids = [row["event_id"] for row in rows]
+            if not event_ids and not omitted:
+                db.commit()
+                return None
+            signature = json.dumps([room_id, event_ids, omitted], ensure_ascii=False, separators=(",", ":"))
+            batch_id = "matrix-peer-" + hashlib.sha256(signature.encode("utf-8")).hexdigest()[:32]
+            db.execute(
+                "INSERT OR IGNORE INTO peer_batches(batch_id,room_id,event_ids,omitted_count,state) VALUES (?,?,?,?,?)",
+                (batch_id, room_id, json.dumps(event_ids), omitted, "in_flight"),
             )
-            db.execute(f"DELETE FROM peer_messages WHERE room_id=? AND event_id IN ({placeholders})", (room_id, *ids))
+            db.commit()
+        return {"batch_id": batch_id, "event_ids": event_ids, "omitted_count": omitted}
+
+    def complete_batch(self, *, room_id: str, batch_id: str, success: bool, auto_clear: bool = False) -> bool:
+        """Settle only a batch previously prepared for this room; failed turns remain retryable."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            batch = db.execute(
+                "SELECT event_ids,omitted_count,state FROM peer_batches WHERE batch_id=? AND room_id=?",
+                (batch_id, room_id),
+            ).fetchone()
+            if not batch:
+                db.rollback()
+                return False
+            if batch["state"] != "in_flight":
+                db.commit()
+                return True
+            if not success:
+                db.execute("UPDATE peer_batches SET state='in_flight' WHERE batch_id=?", (batch_id,))
+                db.commit()
+                return True
+            ids = json.loads(batch["event_ids"])
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                db.execute(
+                    f"UPDATE peer_messages SET delivered=1 WHERE room_id=? AND event_id IN ({placeholders})",
+                    (room_id, *ids),
+                )
+            db.execute(
+                "UPDATE peer_buffer_meta SET delivered_omitted_count=delivered_omitted_count+? WHERE room_id=?",
+                (int(batch["omitted_count"]), room_id),
+            )
+            db.execute("UPDATE peer_batches SET state='delivered' WHERE batch_id=?", (batch_id,))
+            if auto_clear:
+                if ids:
+                    placeholders = ",".join("?" for _ in ids)
+                    db.execute(
+                        f"DELETE FROM peer_messages WHERE room_id=? AND event_id IN ({placeholders})",
+                        (room_id, *ids),
+                    )
+                db.execute("UPDATE peer_batches SET state='acknowledged' WHERE batch_id=?", (batch_id,))
+            db.commit()
+        return True
+
+    def acknowledge_batch(self, *, room_id: str, batch_id: str) -> int:
+        """Acknowledge a known, prepared batch; arbitrary event IDs are never accepted."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            batch = db.execute(
+                "SELECT event_ids,state FROM peer_batches WHERE batch_id=? AND room_id=?",
+                (batch_id, room_id),
+            ).fetchone()
+            if not batch or batch["state"] not in {"in_flight", "delivered"}:
+                db.rollback()
+                raise ValueError("unknown or undelivered Matrix peer batch")
+            ids = json.loads(batch["event_ids"])
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                count = db.execute(
+                    f"SELECT count(*) FROM peer_messages WHERE room_id=? AND event_id IN ({placeholders})",
+                    (room_id, *ids),
+                ).fetchone()[0]
+                db.execute(
+                    f"DELETE FROM peer_messages WHERE room_id=? AND event_id IN ({placeholders})",
+                    (room_id, *ids),
+                )
+            else:
+                count = 0
+            db.execute("UPDATE peer_batches SET state='acknowledged' WHERE batch_id=?", (batch_id,))
             db.commit()
         return int(count)
+
+    def acknowledge(self, *, room_id: str, event_ids: Iterable[str]) -> int:
+        """Compatibility guard: acknowledgements must use a batch identity."""
+        del event_ids
+        raise ValueError("batch_id is required for Matrix peer acknowledgements")

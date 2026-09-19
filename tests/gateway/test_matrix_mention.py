@@ -395,7 +395,7 @@ class TestPeerAgentBudgetGating:
         assert adapter._peer_reply_budget_remaining["!room1:example.org"] == 1
 
     @pytest.mark.asyncio
-    async def test_peer_command_still_requires_mention_and_budget(self, monkeypatch):
+    async def test_peer_control_command_keeps_original_control_path(self, monkeypatch):
         adapter = self._adapter(monkeypatch)
         adapter._peer_reply_budget_remaining["!room1:example.org"] = 2
 

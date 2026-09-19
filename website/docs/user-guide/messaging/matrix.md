@@ -102,7 +102,7 @@ matrix:
   peer_reply_budget_per_human_message: 2  # Peer-triggered calls opened by each authorized human message
   peer_message_buffer:
     enabled: false                 # Opt in to durable gated-peer retention
-    auto_clear: false              # Explicit matrix_ack_peer_messages is the normal removal path
+    auto_clear: false              # Clear automatically only after a successful completed turn
     max_count: 100                 # Newest messages retained per room
     max_bytes: 262144              # UTF-8 bytes retained per room
     max_message_bytes: 16384       # Oversized messages are UTF-8 safely truncated with a marker
@@ -187,11 +187,14 @@ store. The next permitted turn receives the retained messages oldest-to-newest
 with sender, timestamp, event ID, and an omission notice when retention evicted
 older entries. Retained messages are quoted data and are not re-parsed as
 commands. Reading/delivery does not remove them; the model may call
-`matrix_ack_peer_messages` with the exact delivered event IDs. The tool is
-limited to the current Matrix profile and room, is idempotent, and concurrent
-new arrivals remain pending. `auto_clear` is reserved for a future turn-lifecycle
-integration and defaults off, so a restart or failed turn cannot lose pending
-messages.
+`matrix_ack_peer_messages` with the exact delivered `batch_id`. The tool is
+limited to the current Matrix session and room, rejects unknown or undelivered
+batches, and concurrent new arrivals remain pending. With `auto_clear: true`,
+the adapter clears only after the specific background turn completes successfully
+(including a successful `NO_REPLY` turn); failures leave the batch retryable.
+With the default `auto_clear: false`, successful delivery marks the batch as
+delivered without deleting it, so it can be read on demand without being
+automatically appended again.
 
 Hermes tells agents in Matrix shared rooms that they may return exactly
 `NO_REPLY` on unaddressed room messages when they have nothing useful, warm, or
