@@ -45,13 +45,18 @@ idempotent for an already acknowledged batch.
 ## State and bounds
 
 Batch reservation is serialized on the canonical resolved `SessionEntry.session_id`
-and turn identity, before context attachment. A losing claim does not attach or
-process the batch. Claimed-but-unsettled batches remain discoverable and readable
-on restart. A per-process claim owner permits reclaim after restart only when no
-exact canonical receipt exists; a live process cannot steal its active claim.
+and turn identity, after any pre-turn hygiene rotation and before context attachment.
+A losing claim does not attach or process the batch. Delivered-but-unacknowledged
+batches are not automatically prefixed again; a bounded Matrix plugin tool can list
+and read them in the same profile and room after a canonical session transition. The
+original canonical receipt remains the delivery proof, while an exact read atomically
+authorizes the current canonical session to acknowledge that batch. A per-process
+claim owner permits reclaim after restart only when no exact canonical receipt exists;
+a live process cannot steal its active claim.
 Preparation never creates a duplicate append. Event IDs are replay
 safe and bounded metadata is pruned with the bounded batch ledger. Omission is
-represented as a per-reservation generation/delta, acknowledged exactly once, so
+represented as a per-reservation generation/delta, settled exactly once across
+delivery and later acknowledgement, so
 repeated snapshots do not repeat notices.
 
 Commands are classified before augmentation and retain existing peer authorization

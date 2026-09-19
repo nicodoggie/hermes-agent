@@ -2533,16 +2533,38 @@ class MatrixAdapter(MatrixInboundMixin, BasePlatformAdapter):
         msg_id, room_id = event.message_id, event.source.chat_id
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         batch_id = raw.get("_matrix_peer_batch_id")
-        if batch_id and raw.get("_persisted_integration_receipt"):
-            self._peer_message_buffer.mark_included(room_id=room_id, batch_id=str(batch_id))
+        if batch_id:
+            receipt_confirmed = False
+            receipt = self._peer_message_buffer.batch_receipt(
+                room_id=room_id, batch_id=str(batch_id),
+            )
+            if receipt and receipt.get("content_sha256"):
+                from hermes_state import SessionDB
+                session_db = SessionDB(get_hermes_home() / "state.db")
+                try:
+                    receipt_confirmed = session_db.has_inbound_integration_receipt(
+                        receipt["session_id"],
+                        platform_message_id=receipt["inbound_event_id"],
+                        integration="matrix-peer-buffer", receipt_id=str(batch_id),
+                        content_sha256=receipt["content_sha256"],
+                    )
+                finally:
+                    session_db.close()
+            if receipt_confirmed:
+                raw["_persisted_integration_receipt"] = True
+                self._peer_message_buffer.mark_included(room_id=room_id, batch_id=str(batch_id))
             self._peer_message_buffer.complete_batch(
                 room_id=room_id,
                 batch_id=str(batch_id),
-                success=(
-                    outcome == ProcessingOutcome.SUCCESS
+                # A committed canonical row means delivery happened even if the model or egress
+                # later failed. Settle it as delivered to prevent duplicate prefix insertion;
+                # auto-clear remains gated on successful model completion (including NO_REPLY).
+                success=receipt_confirmed,
+                auto_clear=(
+                    self._peer_message_buffer.config.auto_clear
+                    and outcome == ProcessingOutcome.SUCCESS
                     and bool(raw.get("_inbound_model_turn_succeeded"))
                 ),
-                auto_clear=self._peer_message_buffer.config.auto_clear,
             )
         if not self._reactions_enabled or not msg_id or not room_id or outcome == ProcessingOutcome.CANCELLED:
             return

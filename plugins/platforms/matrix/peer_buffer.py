@@ -80,6 +80,8 @@ class MatrixPeerBuffer:
                         included INTEGER NOT NULL DEFAULT 0,
                         content_sha256 TEXT,
                         claim_owner TEXT,
+                        read_session_key TEXT,
+                        omission_settled INTEGER NOT NULL DEFAULT 0,
                         created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
                     );
                     """
@@ -102,10 +104,18 @@ class MatrixPeerBuffer:
                     ("included", "INTEGER NOT NULL DEFAULT 0"),
                     ("content_sha256", "TEXT"),
                     ("claim_owner", "TEXT"),
+                    ("read_session_key", "TEXT"),
+                    ("omission_settled", "INTEGER NOT NULL DEFAULT 0"),
                     ("created_at", "REAL NOT NULL DEFAULT 0"),
                 ):
                     if name not in batch_columns:
                         db.execute(f"ALTER TABLE peer_batches ADD COLUMN {name} {definition}")
+                # Older schemas already advanced omission progress when entering either terminal
+                # state. Mark those snapshots settled so a later acknowledgement cannot replay it.
+                db.execute(
+                    "UPDATE peer_batches SET omission_settled=1 "
+                    "WHERE state IN ('delivered','acknowledged') AND omission_settled=0"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.db_path, timeout=10)
@@ -285,7 +295,8 @@ class MatrixPeerBuffer:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             batch = db.execute(
-                "SELECT event_ids,omitted_count,state,claimed,ack_count,included FROM peer_batches WHERE batch_id=? AND room_id=?",
+                "SELECT event_ids,omitted_count,state,claimed,ack_count,included,omission_settled "
+                "FROM peer_batches WHERE batch_id=? AND room_id=?",
                 (batch_id, room_id),
             ).fetchone()
             if not batch:
@@ -318,11 +329,15 @@ class MatrixPeerBuffer:
                     f"UPDATE peer_messages SET delivered=1 WHERE room_id=? AND event_id IN ({placeholders})",
                     (room_id, *ids),
                 )
+            if not batch["omission_settled"]:
+                db.execute(
+                    "UPDATE peer_buffer_meta SET delivered_omitted_count=delivered_omitted_count+? WHERE room_id=?",
+                    (int(batch["omitted_count"]), room_id),
+                )
             db.execute(
-                "UPDATE peer_buffer_meta SET delivered_omitted_count=delivered_omitted_count+? WHERE room_id=?",
-                (int(batch["omitted_count"]), room_id),
+                "UPDATE peer_batches SET state='delivered',omission_settled=1 WHERE batch_id=?",
+                (batch_id,),
             )
-            db.execute("UPDATE peer_batches SET state='delivered' WHERE batch_id=?", (batch_id,))
             if auto_clear:
                 if ids:
                     placeholders = ",".join("?" for _ in ids)
@@ -352,7 +367,8 @@ class MatrixPeerBuffer:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             batch = db.execute(
-                "SELECT event_ids,omitted_count,state,claimed,session_key,ack_count,included FROM peer_batches WHERE batch_id=? AND room_id=?",
+                "SELECT event_ids,omitted_count,state,claimed,session_key,read_session_key,"
+                "ack_count,included,omission_settled FROM peer_batches WHERE batch_id=? AND room_id=?",
                 (batch_id, room_id),
             ).fetchone()
             if batch and batch["state"] == "acknowledged":
@@ -360,7 +376,8 @@ class MatrixPeerBuffer:
                 return int(batch["ack_count"])
             if (not batch or batch["state"] not in {"in_flight", "delivered"}
                     or not batch["included"]
-                    or not batch["claimed"] or (session_key and batch["session_key"] != session_key)):
+                    or not batch["claimed"]
+                    or (session_key and session_key not in {batch["session_key"], batch["read_session_key"]})):
                 db.rollback()
                 raise ValueError("unknown or undelivered Matrix peer batch")
             ids = json.loads(batch["event_ids"])
@@ -378,13 +395,72 @@ class MatrixPeerBuffer:
                 count = 0
             db.execute("UPDATE peer_batches SET state='acknowledged',ack_count=? WHERE batch_id=?",
                        (int(count), batch_id))
-            db.execute(
-                "UPDATE peer_buffer_meta SET delivered_omitted_count=delivered_omitted_count+? "
-                "WHERE room_id=?",
-                (int(batch["omitted_count"]), room_id),
-            )
+            if not batch["omission_settled"]:
+                db.execute(
+                    "UPDATE peer_buffer_meta SET delivered_omitted_count=delivered_omitted_count+? "
+                    "WHERE room_id=?",
+                    (int(batch["omitted_count"]), room_id),
+                )
+                db.execute("UPDATE peer_batches SET omission_settled=1 WHERE batch_id=?", (batch_id,))
             db.commit()
         return int(count)
+
+    def delivered_batches(self, *, room_id: str, limit: int = 20) -> list[dict]:
+        """Return bounded metadata for delivered batches still awaiting acknowledgement."""
+        bounded = max(1, min(int(limit), 50))
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT batch_id,event_ids,omitted_count,session_key,turn_key,content_sha256 "
+                "FROM peer_batches WHERE room_id=? AND state='delivered' "
+                "ORDER BY rowid DESC LIMIT ?",
+                (room_id, bounded),
+            ).fetchall()
+        return [
+            {
+                "batch_id": row["batch_id"],
+                "event_count": len(json.loads(row["event_ids"])),
+                "omitted_count": int(row["omitted_count"]),
+                "session_id": row["session_key"],
+                "inbound_event_id": row["turn_key"],
+                "content_sha256": row["content_sha256"] or "",
+            }
+            for row in rows
+        ]
+
+    def read_delivered_batch(
+        self, *, room_id: str, batch_id: str, session_key: str,
+    ) -> dict | None:
+        """Expose one delivered batch and atomically authorize its reader to acknowledge it."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            batch = db.execute(
+                "SELECT event_ids,omitted_count FROM peer_batches "
+                "WHERE room_id=? AND batch_id=? AND state='delivered' AND claimed=1",
+                (room_id, batch_id),
+            ).fetchone()
+            if not batch:
+                db.rollback()
+                return None
+            ids = json.loads(batch["event_ids"])
+            messages = []
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                messages = [dict(row) for row in db.execute(
+                    f"SELECT event_id,sender,timestamp,body FROM peer_messages "
+                    f"WHERE room_id=? AND event_id IN ({placeholders}) ORDER BY timestamp,event_id",
+                    (room_id, *ids),
+                ).fetchall()]
+            db.execute(
+                "UPDATE peer_batches SET read_session_key=? WHERE room_id=? AND batch_id=? "
+                "AND state='delivered'",
+                (session_key, room_id, batch_id),
+            )
+            db.commit()
+        return {
+            "batch_id": batch_id,
+            "messages": messages,
+            "omitted_count": int(batch["omitted_count"]),
+        }
 
     def batch_receipt(self, *, room_id: str, batch_id: str) -> dict | None:
         """Return bounded identity needed to prove this batch's exact canonical row."""

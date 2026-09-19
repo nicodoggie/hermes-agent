@@ -32,12 +32,15 @@ SHA-256 identity of the exact augmented user content. Both the same-turn acknowl
 and post-turn settlement use a narrow canonical-row lookup; adapters without an integration
 receipt do no transcript read.
 
-Batch claims carry a process owner. A live process cannot steal its own active reservation; a
-new process may reclaim a dead reservation only when the old canonical row has no exact receipt.
-Successful non-auto-clear batches are not prefixed again, while their retained content remains
-available for an idempotent manual acknowledgement. Auto-clear additionally requires the exact
+Batch claims carry a process owner and are created after pre-turn hygiene chooses the final
+canonical session ID. A live process cannot steal its own active reservation; a new process may
+reclaim a dead reservation only when the old canonical row has no exact receipt. Successful
+non-auto-clear batches are not prefixed again. A bounded read tool verifies the original receipt
+and makes their retained content available to the current canonical session in the same profile
+and room before acknowledgement. Auto-clear additionally requires the exact
 durable receipt and a successful model turn (intentional `NO_REPLY` remains a successful turn).
-Failure and cancellation release or retain unacknowledged data as appropriate.
+Failure and cancellation reconcile the canonical receipt and immediately release an uncommitted
+live-process claim. Each batch's omission snapshot advances exactly once across delivery and ack.
 
 Focused verification exercises the gateway-to-TurnRunner metadata route, a real `AIAgent` with a
 fake provider calling the real acknowledgement handler after pre-LLM persistence, exact receipt

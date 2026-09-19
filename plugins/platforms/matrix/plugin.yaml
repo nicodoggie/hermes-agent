@@ -10,6 +10,7 @@ description: >
   rooms, and per-room allowlists.
 author: NousResearch
 provides_tools:
+  - matrix_read_peer_messages
   - matrix_ack_peer_messages
 requires_env:
   - name: MATRIX_HOMESERVER

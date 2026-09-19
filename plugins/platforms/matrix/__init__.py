@@ -1,7 +1,7 @@
 """Matrix platform plugin with a deferred inbound adapter and lightweight client tools."""
 
 from .peer_buffer import MatrixPeerBuffer, PeerBufferConfig
-from .tools import _ack_peer_messages
+from .tools import _ack_peer_messages, _read_peer_messages
 
 
 def register(ctx) -> None:

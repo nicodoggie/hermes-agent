@@ -8,7 +8,7 @@ from hermes_state import SessionDB
 from .peer_buffer import MatrixPeerBuffer, PeerBufferConfig
 
 
-def _ack_peer_messages(args: dict) -> str:
+def _ack_peer_messages(args: dict, **_kwargs) -> str:
     """Acknowledge one exact, previously prepared Matrix peer batch."""
     if get_session_env("HERMES_SESSION_PLATFORM", "").lower() != "matrix":
         return json.dumps({"ok": False, "error": "Matrix session required"})
@@ -25,7 +25,7 @@ def _ack_peer_messages(args: dict) -> str:
         session_db = SessionDB(get_hermes_home() / "state.db")
         try:
             committed = session_db.has_inbound_integration_receipt(
-                session_id,
+                receipt["session_id"],
                 platform_message_id=receipt["inbound_event_id"],
                 integration="matrix-peer-buffer", receipt_id=batch_id,
                 content_sha256=receipt["content_sha256"],
@@ -45,7 +45,65 @@ def _ack_peer_messages(args: dict) -> str:
     return json.dumps({"ok": True, "room_id": room_id, "acknowledged": count, "batch_id": batch_id})
 
 
+def _read_peer_messages(args: dict, **_kwargs) -> str:
+    """Discover or read delivered, unacknowledged batches in the current Matrix room."""
+    if get_session_env("HERMES_SESSION_PLATFORM", "").lower() != "matrix":
+        return json.dumps({"ok": False, "error": "Matrix session required"})
+    room_id = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
+    session_id = get_session_env("HERMES_SESSION_ID", "").strip()
+    if not room_id or not session_id:
+        return json.dumps({"ok": False, "error": "a canonical Matrix room session is required"})
+    store = MatrixPeerBuffer(get_hermes_home() / "matrix_peer_messages.sqlite3", PeerBufferConfig(enabled=True))
+    batch_id = args.get("batch_id") if isinstance(args, dict) else None
+    candidates = store.delivered_batches(room_id=room_id)
+    if not batch_id:
+        return json.dumps({
+            "ok": True,
+            "room_id": room_id,
+            "batches": [
+                {k: row[k] for k in ("batch_id", "event_count", "omitted_count")}
+                for row in candidates
+            ],
+        })
+    candidate = next((row for row in candidates if row["batch_id"] == batch_id), None)
+    if candidate is None:
+        return json.dumps({"ok": False, "error": "unknown or undelivered Matrix peer batch"})
+    session_db = SessionDB(get_hermes_home() / "state.db")
+    try:
+        committed = session_db.has_inbound_integration_receipt(
+            candidate["session_id"],
+            platform_message_id=candidate["inbound_event_id"],
+            integration="matrix-peer-buffer", receipt_id=batch_id,
+            content_sha256=candidate["content_sha256"],
+        )
+    finally:
+        session_db.close()
+    if not committed:
+        return json.dumps({"ok": False, "error": "unverified Matrix peer batch receipt"})
+    batch = store.read_delivered_batch(
+        room_id=room_id, batch_id=batch_id, session_key=session_id,
+    )
+    if batch is None:
+        return json.dumps({"ok": False, "error": "unknown or undelivered Matrix peer batch"})
+    return json.dumps({"ok": True, "room_id": room_id, **batch}, ensure_ascii=False)
+
+
 def register_tools(ctx) -> None:
+    ctx.register_tool(
+        name="matrix_read_peer_messages",
+        toolset="hermes-matrix",
+        schema={
+            "name": "matrix_read_peer_messages",
+            "description": "List or read retained delivered Matrix peer batches in the current room.",
+            "parameters": {
+                "type": "object",
+                "properties": {"batch_id": {"type": "string"}},
+            },
+        },
+        handler=_read_peer_messages,
+        description="Read exact retained Matrix peer messages for the current room.",
+        emoji="📖",
+    )
     ctx.register_tool(
         name="matrix_ack_peer_messages",
         toolset="hermes-matrix",

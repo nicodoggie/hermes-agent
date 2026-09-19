@@ -674,6 +674,11 @@ class GatewayTurnPrepareMixin:
         if _vc_note:
             turn_sidecar_notes.append(_vc_note)
 
+        rotated_context = build_session_context(source, self.config, session_entry)
+        if rotated_context.session_id != context.session_id:
+            self._clear_session_env(_session_env_tokens)
+            context = rotated_context
+            _session_env_tokens = self._set_session_env(context)
         adapter = self._intake_adapter_for(source)
         if adapter is not None:
             event = await adapter.prepare_inbound_event(
