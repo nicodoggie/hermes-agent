@@ -23,6 +23,7 @@ def test_restart_retains_oldest_first_and_ack_is_idempotent(tmp_path):
     assert [row["event_id"] for row in second.pending("!r:hs")["messages"]] == ["$1", "$2"]
     batch = second.prepare_batch("!r:hs")
     assert batch and batch["event_ids"] == ["$1", "$2"]
+    assert second.claim_batch(room_id="!r:hs", batch_id=batch["batch_id"], session_key="matrix:!r:hs", turn_key="$turn")
     assert second.complete_batch(room_id="!r:hs", batch_id=batch["batch_id"], success=True) is True
     assert second.acknowledge_batch(room_id="!r:hs", batch_id=batch["batch_id"]) == 2
     with pytest.raises(ValueError):
@@ -50,6 +51,18 @@ def test_retention_reports_evictions_and_truncates_at_utf8_boundary(tmp_path):
     assert "truncated" in pending["messages"][-1]["body"] or pending["messages"][-1]["body"] == "three"
 
 
+def test_ack_preserves_omissions_added_after_batch_snapshot(tmp_path):
+    buffer = store(tmp_path, max_count=1)
+    buffer.add(room_id="!r:hs", event_id="$1", sender="@a:hs", timestamp=1, body="one")
+    buffer.add(room_id="!r:hs", event_id="$2", sender="@a:hs", timestamp=2, body="two")
+    batch = buffer.prepare_batch("!r:hs")
+    assert batch
+    assert buffer.claim_batch(room_id="!r:hs", batch_id=batch["batch_id"], session_key="matrix:!r:hs", turn_key="$turn")
+    buffer.add(room_id="!r:hs", event_id="$3", sender="@a:hs", timestamp=3, body="three")
+    assert buffer.acknowledge_batch(room_id="!r:hs", batch_id=batch["batch_id"]) == 0
+    assert buffer.pending("!r:hs")["omitted_count"] - buffer.pending("!r:hs")["delivered_omitted_count"] == 1
+
+
 def test_ack_cannot_clear_another_room(tmp_path):
     buffer = store(tmp_path)
     buffer.add(room_id="!other:hs", event_id="$secret", sender="@a:hs", timestamp=1, body="x")
@@ -63,9 +76,11 @@ def test_successful_non_auto_clear_batch_is_not_reappended_but_failure_retries(t
     buffer.add(room_id="!r:hs", event_id="$1", sender="@a:hs", timestamp=1, body="one")
     batch = buffer.prepare_batch("!r:hs")
     assert batch
+    assert buffer.claim_batch(room_id="!r:hs", batch_id=batch["batch_id"], session_key="matrix:!r:hs", turn_key="$turn")
     assert buffer.complete_batch(room_id="!r:hs", batch_id=batch["batch_id"], success=False)
     retry = buffer.prepare_batch("!r:hs")
     assert retry and retry["batch_id"] == batch["batch_id"]
+    assert buffer.claim_batch(room_id="!r:hs", batch_id=retry["batch_id"], session_key="matrix:!r:hs", turn_key="$turn2")
     assert buffer.complete_batch(room_id="!r:hs", batch_id=batch["batch_id"], success=True)
     assert buffer.prepare_batch("!r:hs") is None
     buffer.add(room_id="!r:hs", event_id="$2", sender="@a:hs", timestamp=2, body="two")
@@ -81,6 +96,7 @@ def test_ack_tool_is_current_matrix_room_scoped(monkeypatch, tmp_path):
     buffer.add(room_id="!room:hs", event_id="$1", sender="@a:hs", timestamp=1, body="x")
     batch = buffer.prepare_batch("!room:hs")
     assert batch
+    assert buffer.claim_batch(room_id="!room:hs", batch_id=batch["batch_id"], session_key="matrix:!room:hs", turn_key="$turn")
     result = _ack_peer_messages({"batch_id": batch["batch_id"]})
     assert '"ok": true' in result
     assert not buffer.pending("!room:hs")["messages"]
@@ -112,6 +128,30 @@ async def test_gated_peer_is_buffered_without_model_call_then_delivered(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_gateway_lifecycle_claims_and_settles_batch(tmp_path, monkeypatch):
+    """The real adapter gateway task claims only after its processing-start hook."""
+    monkeypatch.setenv("MATRIX_ALLOWED_USERS", "@alice:example.org,@agent-b:example.org")
+    monkeypatch.setenv("MATRIX_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("MATRIX_AUTO_THREAD", "false")
+    adapter = _make_adapter(extra={
+        "peer_agent_ids": ["@agent-b:example.org"],
+        "peer_message_buffer": {"enabled": True, "auto_clear": True},
+    })
+    adapter._peer_message_buffer = MatrixPeerBuffer(
+        tmp_path / "profile" / "state.sqlite3", PeerBufferConfig(enabled=True, auto_clear=True))
+    await adapter._on_room_message(_make_event("peer hello", sender="@agent-b:example.org", event_id="$blocked"))
+    from gateway.platforms.base import BasePlatformAdapter
+    adapter.handle_message = BasePlatformAdapter.handle_message.__get__(adapter, type(adapter))
+    async def handler(_event):
+        return None
+    adapter.set_message_handler(handler)
+    await adapter._on_room_message(_make_event("@hermes:example.org go", sender="@alice:example.org", event_id="$turn"))
+    task = next(iter(adapter._session_tasks.values()))
+    await task
+    assert not adapter._peer_message_buffer.pending("!room1:example.org")["messages"]
+
+
+@pytest.mark.asyncio
 async def test_auto_clear_happens_only_after_successful_turn(monkeypatch, tmp_path):
     monkeypatch.setenv("MATRIX_ALLOWED_USERS", "@alice:example.org,@agent-b:example.org")
     monkeypatch.setenv("MATRIX_REQUIRE_MENTION", "true")
@@ -125,6 +165,7 @@ async def test_auto_clear_happens_only_after_successful_turn(monkeypatch, tmp_pa
     await adapter._on_room_message(_make_event("peer hello", sender="@agent-b:example.org", event_id="$blocked"))
     await adapter._on_room_message(_make_event("@hermes:example.org go", sender="@alice:example.org", event_id="$ok"))
     batch_event = adapter.handle_message.await_args.args[0]
+    await adapter.on_processing_start(batch_event)
     await adapter.on_processing_complete(batch_event, __import__("gateway.platforms.base", fromlist=["ProcessingOutcome"]).ProcessingOutcome.SUCCESS)
     assert not adapter._peer_message_buffer.pending("!room1:example.org")["messages"]
 

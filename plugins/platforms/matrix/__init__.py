@@ -1,46 +1,22 @@
-import json
+"""Matrix platform plugin with a deferred inbound adapter and lightweight client tools."""
 
-from gateway.session_context import get_session_env
-from hermes_constants import get_hermes_home
-
-from .adapter import MatrixAdapter, register as register_platform
 from .peer_buffer import MatrixPeerBuffer, PeerBufferConfig
-
-
-def _ack_peer_messages(args: dict) -> str:
-    """Acknowledge one exact, previously prepared Matrix peer batch."""
-    if get_session_env("HERMES_SESSION_PLATFORM", "").lower() != "matrix":
-        return json.dumps({"ok": False, "error": "Matrix session required"})
-    room_id = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
-    batch_id = args.get("batch_id") if isinstance(args, dict) else None
-    if not room_id or not isinstance(batch_id, str) or not batch_id:
-        return json.dumps({"ok": False, "error": "batch_id and a Matrix room session are required"})
-    store = MatrixPeerBuffer(get_hermes_home() / "matrix_peer_messages.sqlite3", PeerBufferConfig(enabled=True))
-    try:
-        count = store.acknowledge_batch(room_id=room_id, batch_id=batch_id)
-    except ValueError as exc:
-        return json.dumps({"ok": False, "error": str(exc)})
-    return json.dumps({"ok": True, "room_id": room_id, "acknowledged": count, "batch_id": batch_id})
+from .tools import _ack_peer_messages
 
 
 def register(ctx) -> None:
+    from .adapter import MatrixAdapter, register as register_platform
+    from .tools import register_tools
+
     register_platform(ctx)
-    ctx.register_tool(
-        name="matrix_ack_peer_messages",
-        toolset="hermes-matrix",
-        schema={
-            "name": "matrix_ack_peer_messages",
-            "description": "Acknowledge an exact delivered Matrix peer batch in the current room.",
-            "parameters": {
-                "type": "object",
-                "properties": {"batch_id": {"type": "string"}},
-                "required": ["batch_id"],
-            },
-        },
-        handler=_ack_peer_messages,
-        description="Acknowledge exact retained Matrix peer messages for the current room.",
-        emoji="📥",
-    )
+    register_tools(ctx)
 
 
-__all__ = ["MatrixAdapter", "register"]
+def __getattr__(name):
+    if name == "MatrixAdapter":
+        from .adapter import MatrixAdapter
+        return MatrixAdapter
+    raise AttributeError(name)
+
+
+__all__ = ["MatrixAdapter", "MatrixPeerBuffer", "PeerBufferConfig", "register"]

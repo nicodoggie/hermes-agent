@@ -2127,7 +2127,7 @@ class MatrixAdapter(MatrixInboundMixin, BasePlatformAdapter):
         if ctx is None:
             return None
         body, _is_dm, _chat_type, _thread_id, display_name, source = ctx
-        body, peer_batch = self._prepend_peer_buffer(room_id, body) if not body.startswith("/") else (body, None)
+        body, peer_batch = self._prepend_peer_buffer(room_id, body)
         body, reply_to, reply_to_text, reply_to_author_id, reply_to_author_name = (
             await self._extract_reply_context(room_id, body, relates_to))
         media_msgtype = extra.pop("media_msgtype", None)
@@ -2445,6 +2445,15 @@ class MatrixAdapter(MatrixInboundMixin, BasePlatformAdapter):
         task.add_done_callback(self._reaction_redaction_tasks.discard)
 
     async def on_processing_start(self, event: MessageEvent) -> None:
+        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        batch_id = raw.get("_matrix_peer_batch_id")
+        if batch_id:
+            self._peer_message_buffer.claim_batch(
+                room_id=event.source.chat_id,
+                batch_id=str(batch_id),
+                session_key=get_session_env("HERMES_SESSION_KEY") or self._event_session_key(event),
+                turn_key=str(event.message_id or ""),
+            )
         msg_id, room_id = event.message_id, event.source.chat_id
         if self._reactions_enabled and msg_id and room_id:
             reaction_event_id = await self._send_reaction(room_id, msg_id, "\U0001f440")
