@@ -2089,12 +2089,6 @@ class MatrixAdapter(MatrixInboundMixin, BasePlatformAdapter):
                 session_key=canonical_session_id, turn_key=turn_key,
             ):
                 return event
-        augmented, _ = self._prepend_peer_buffer(room_id, event.text, batch=batch)
-        content_sha256 = hashlib.sha256(augmented.encode("utf-8")).hexdigest()
-        if not self._peer_message_buffer.bind_batch_content(
-            room_id=room_id, batch_id=batch["batch_id"], content_sha256=content_sha256,
-        ):
-            return event
         marker = {
             "integration": "matrix-peer-buffer",
             "batch_id": batch["batch_id"],
@@ -2102,14 +2096,42 @@ class MatrixAdapter(MatrixInboundMixin, BasePlatformAdapter):
             "event_ids": list(batch["event_ids"]),
             "reservation_generation": int(batch.get("reservation_generation", 0)),
             "inbound_event_id": str(turn_key),
-            "content_sha256": content_sha256,
         }
         new_raw = dict(raw)
         new_raw["_matrix_peer_batch_id"] = batch["batch_id"]
         new_raw["_persist_user_display_metadata"] = {"integration": marker}
-        event.text = augmented
         event.raw_message = new_raw
         return event
+
+    def attach_inbound_context(self, event: MessageEvent, content: str) -> str:
+        """Attach the claimed peer quotation after trigger-message preprocessing."""
+        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        batch_id = raw.get("_matrix_peer_batch_id")
+        if not batch_id:
+            return content
+        batch = self._peer_message_buffer.prepared_batch(
+            room_id=event.source.chat_id, batch_id=str(batch_id),
+        )
+        if batch is None:
+            raise RuntimeError("reserved Matrix peer batch disappeared before attachment")
+        augmented, _ = self._prepend_peer_buffer(event.source.chat_id, content, batch=batch)
+        return augmented
+
+    def bind_inbound_persistence_content(self, event: MessageEvent, content: Any) -> None:
+        """Bind the peer receipt after generic gateway preprocessing has finalized the DB content."""
+        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        batch_id = raw.get("_matrix_peer_batch_id")
+        metadata = raw.get("_persist_user_display_metadata")
+        marker = metadata.get("integration") if isinstance(metadata, dict) else None
+        if not batch_id or not isinstance(marker, dict):
+            return
+        canonical_content = content if isinstance(content, str) else ""
+        content_sha256 = hashlib.sha256(canonical_content.encode("utf-8")).hexdigest()
+        if not self._peer_message_buffer.bind_batch_content(
+            room_id=event.source.chat_id, batch_id=str(batch_id), content_sha256=content_sha256,
+        ):
+            raise RuntimeError("could not bind Matrix peer batch to canonical inbound content")
+        marker["content_sha256"] = content_sha256
 
     def inbound_persistence_confirmed(self, event: MessageEvent, committed: bool) -> bool:
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}

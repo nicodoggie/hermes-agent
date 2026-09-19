@@ -694,9 +694,20 @@ class GatewayTurnPrepareMixin:
             # A refused local turn answers with its refusal (session_context_refs.turn_references).
             return getattr(event, "_gateway_turn_refusal", None), _session_env_tokens
 
+        if adapter is not None:
+            attached = adapter.attach_inbound_context(event, message_text)
+            message_text = await attached if inspect.isawaitable(attached) else attached
+
         message_text, persist_user_message, persist_user_timestamp = (
             self._hmwa_apply_message_timestamp(event, message_text)
         )
+
+        raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
+        if raw_message.get("_persist_user_display_metadata") and adapter is not None:
+            canonical_content = persist_user_message if persist_user_message is not None else message_text
+            bound = adapter.bind_inbound_persistence_content(event, canonical_content)
+            if inspect.isawaitable(bound):
+                await bound
 
         # Stage the notes (one-shot; consumed in run_sync) AFTER the early-out so an aborted turn
         # cannot leak them into the next turn.

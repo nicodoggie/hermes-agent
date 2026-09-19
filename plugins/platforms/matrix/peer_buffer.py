@@ -199,7 +199,7 @@ class MatrixPeerBuffer:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute(
-                "SELECT batch_id,event_ids,omitted_count FROM peer_batches "
+                "SELECT batch_id,event_ids,omitted_count,reservation_generation FROM peer_batches "
                 "WHERE room_id=? AND state='in_flight' ORDER BY rowid DESC LIMIT 1", (room_id,)
             ).fetchone()
             if existing:
@@ -207,6 +207,7 @@ class MatrixPeerBuffer:
                     "batch_id": existing["batch_id"],
                     "event_ids": json.loads(existing["event_ids"]),
                     "omitted_count": int(existing["omitted_count"]),
+                    "reservation_generation": int(existing["reservation_generation"]),
                 }
             rows = db.execute(
                 "SELECT event_id FROM peer_messages WHERE room_id=? AND delivered=0 ORDER BY timestamp,event_id",
@@ -216,16 +217,21 @@ class MatrixPeerBuffer:
                 "SELECT omitted_count,delivered_omitted_count FROM peer_buffer_meta WHERE room_id=?", (room_id,)
             ).fetchone()
             omitted = max(0, int(meta[0]) - int(meta[1])) if meta else 0
+            omission_watermark = int(meta[0]) if meta else 0
             event_ids = [row["event_id"] for row in rows]
             if not event_ids and not omitted:
                 db.commit()
                 return None
-            signature = json.dumps([room_id, event_ids, omitted], ensure_ascii=False, separators=(",", ":"))
+            signature = json.dumps(
+                [room_id, event_ids, omitted, omission_watermark],
+                ensure_ascii=False, separators=(",", ":"),
+            )
             batch_id = "matrix-peer-" + hashlib.sha256(signature.encode("utf-8")).hexdigest()[:32]
             db.execute(
                 "INSERT OR IGNORE INTO peer_batches "
-                "(batch_id,room_id,event_ids,omitted_count,state,claimed) VALUES (?,?,?,?,?,0)",
-                (batch_id, room_id, json.dumps(event_ids), omitted, "in_flight"),
+                "(batch_id,room_id,event_ids,omitted_count,state,claimed,reservation_generation) "
+                "VALUES (?,?,?,?,?,0,?)",
+                (batch_id, room_id, json.dumps(event_ids), omitted, "in_flight", omission_watermark),
             )
             terminal = db.execute(
                 "SELECT rowid,event_ids,state FROM peer_batches WHERE room_id=? "
@@ -247,7 +253,27 @@ class MatrixPeerBuffer:
             if removable:
                 db.executemany("DELETE FROM peer_batches WHERE rowid=?", ((rowid,) for rowid in removable))
             db.commit()
-        return {"batch_id": batch_id, "event_ids": event_ids, "omitted_count": omitted}
+        return {
+            "batch_id": batch_id, "event_ids": event_ids, "omitted_count": omitted,
+            "reservation_generation": omission_watermark,
+        }
+
+    def prepared_batch(self, *, room_id: str, batch_id: str) -> dict | None:
+        """Return the exact claimed in-flight snapshot reserved for adapter attachment."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT event_ids,omitted_count,reservation_generation FROM peer_batches "
+                "WHERE room_id=? AND batch_id=? AND state='in_flight' AND claimed=1",
+                (room_id, batch_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "batch_id": batch_id,
+            "event_ids": json.loads(row["event_ids"]),
+            "omitted_count": int(row["omitted_count"]),
+            "reservation_generation": int(row["reservation_generation"]),
+        }
 
     def claim_batch(self, *, room_id: str, batch_id: str, session_key: str, turn_key: str) -> bool:
         """Atomically expose a prepared batch to one durable gateway turn."""
@@ -405,15 +431,27 @@ class MatrixPeerBuffer:
             db.commit()
         return int(count)
 
-    def delivered_batches(self, *, room_id: str, limit: int = 20) -> list[dict]:
+    def delivered_batches(
+        self, *, room_id: str, limit: int = 20, before_batch_id: str | None = None,
+    ) -> list[dict]:
         """Return bounded metadata for delivered batches still awaiting acknowledgement."""
         bounded = max(1, min(int(limit), 50))
         with self._connect() as db:
+            before_rowid = None
+            if before_batch_id:
+                cursor = db.execute(
+                    "SELECT rowid FROM peer_batches WHERE room_id=? AND batch_id=?",
+                    (room_id, before_batch_id),
+                ).fetchone()
+                if cursor is None:
+                    return []
+                before_rowid = int(cursor[0])
             rows = db.execute(
                 "SELECT batch_id,event_ids,omitted_count,session_key,turn_key,content_sha256 "
                 "FROM peer_batches WHERE room_id=? AND state='delivered' "
+                "AND (? IS NULL OR rowid < ?) "
                 "ORDER BY rowid DESC LIMIT ?",
-                (room_id, bounded),
+                (room_id, before_rowid, before_rowid, bounded),
             ).fetchall()
         return [
             {
@@ -426,6 +464,25 @@ class MatrixPeerBuffer:
             }
             for row in rows
         ]
+
+    def delivered_batch(self, *, room_id: str, batch_id: str) -> dict | None:
+        """Look up one exact delivered batch without depending on a discovery page."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT batch_id,event_ids,omitted_count,session_key,turn_key,content_sha256 "
+                "FROM peer_batches WHERE room_id=? AND batch_id=? AND state='delivered'",
+                (room_id, batch_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "batch_id": row["batch_id"],
+            "event_count": len(json.loads(row["event_ids"])),
+            "omitted_count": int(row["omitted_count"]),
+            "session_id": row["session_key"],
+            "inbound_event_id": row["turn_key"],
+            "content_sha256": row["content_sha256"] or "",
+        }
 
     def read_delivered_batch(
         self, *, room_id: str, batch_id: str, session_key: str,

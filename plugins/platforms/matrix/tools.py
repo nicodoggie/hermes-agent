@@ -55,17 +55,23 @@ def _read_peer_messages(args: dict, **_kwargs) -> str:
         return json.dumps({"ok": False, "error": "a canonical Matrix room session is required"})
     store = MatrixPeerBuffer(get_hermes_home() / "matrix_peer_messages.sqlite3", PeerBufferConfig(enabled=True))
     batch_id = args.get("batch_id") if isinstance(args, dict) else None
-    candidates = store.delivered_batches(room_id=room_id)
+    before_batch_id = args.get("before_batch_id") if isinstance(args, dict) else None
     if not batch_id:
+        candidates = store.delivered_batches(
+            room_id=room_id, limit=21,
+            before_batch_id=before_batch_id if isinstance(before_batch_id, str) else None,
+        )
+        page = candidates[:20]
         return json.dumps({
             "ok": True,
             "room_id": room_id,
             "batches": [
                 {k: row[k] for k in ("batch_id", "event_count", "omitted_count")}
-                for row in candidates
+                for row in page
             ],
+            "next_before_batch_id": page[-1]["batch_id"] if len(candidates) > 20 else None,
         })
-    candidate = next((row for row in candidates if row["batch_id"] == batch_id), None)
+    candidate = store.delivered_batch(room_id=room_id, batch_id=batch_id)
     if candidate is None:
         return json.dumps({"ok": False, "error": "unknown or undelivered Matrix peer batch"})
     session_db = SessionDB(get_hermes_home() / "state.db")
@@ -97,7 +103,13 @@ def register_tools(ctx) -> None:
             "description": "List or read retained delivered Matrix peer batches in the current room.",
             "parameters": {
                 "type": "object",
-                "properties": {"batch_id": {"type": "string"}},
+                "properties": {
+                    "batch_id": {"type": "string"},
+                    "before_batch_id": {
+                        "type": "string",
+                        "description": "Continue discovery before the prior page's last batch ID.",
+                    },
+                },
             },
         },
         handler=_read_peer_messages,

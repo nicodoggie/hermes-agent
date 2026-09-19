@@ -3485,6 +3485,15 @@ class BasePlatformAdapter(ABC):
         del canonical_session_id, turn_key
         return event
 
+    def attach_inbound_context(self, event: MessageEvent, content: str) -> str:
+        """Attach adapter-owned inert context after user-controlled preprocessing."""
+        del event
+        return content
+
+    def bind_inbound_persistence_content(self, event: MessageEvent, content: Any) -> None:
+        """Bind opt-in integration metadata to the final canonical user-row content."""
+        del event, content
+
     def inbound_persistence_confirmed(self, event: MessageEvent, transcript: list[dict]) -> bool:
         """Return whether an inbound integration receipt is in the committed transcript."""
         del event, transcript

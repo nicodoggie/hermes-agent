@@ -92,6 +92,26 @@ def test_delivery_then_ack_advances_omission_snapshot_exactly_once(tmp_path):
     assert pending["omitted_count"] - pending["delivered_omitted_count"] == 1
 
 
+def test_equal_sized_omission_only_generations_have_distinct_identities(tmp_path):
+    buffer = store(tmp_path, max_count=0)
+    identities = []
+    for generation in range(2):
+        buffer.add(
+            room_id="!r:hs", event_id=f"${generation}", sender="@a:hs",
+            timestamp=generation, body="evicted",
+        )
+        batch = buffer.prepare_batch("!r:hs")
+        assert batch and batch["event_ids"] == [] and batch["omitted_count"] == 1
+        identities.append(batch["batch_id"])
+        assert buffer.claim_batch(
+            room_id="!r:hs", batch_id=batch["batch_id"],
+            session_key="canonical", turn_key=f"$turn-{generation}",
+        )
+        assert buffer.mark_included(room_id="!r:hs", batch_id=batch["batch_id"])
+        assert buffer.complete_batch(room_id="!r:hs", batch_id=batch["batch_id"], success=True)
+    assert identities[0] != identities[1]
+
+
 def test_ack_cannot_clear_another_room(tmp_path):
     buffer = store(tmp_path)
     buffer.add(room_id="!other:hs", event_id="$secret", sender="@a:hs", timestamp=1, body="x")
@@ -204,6 +224,8 @@ def test_registry_discovers_and_dispatches_delivered_batch_read_after_session_tr
 
     import model_tools
     from tools.registry import registry
+    from hermes_cli.plugins import discover_plugins
+    discover_plugins(force=True)
     model_tools.get_tool_definitions(enabled_toolsets=["hermes-matrix"])
     for name in ("matrix_read_peer_messages", "matrix_ack_peer_messages"):
         entry = registry.get_entry(name)
@@ -226,6 +248,66 @@ def test_registry_discovers_and_dispatches_delivered_batch_read_after_session_tr
         clear_session_vars(tokens)
     assert '"ok": true' in acknowledged
     assert not buffer.pending("!room:hs")["messages"]
+
+
+def test_read_exact_old_batch_and_page_bounded_discovery(monkeypatch, tmp_path):
+    home = tmp_path / "profile"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    buffer = MatrixPeerBuffer(home / "matrix_peer_messages.sqlite3", PeerBufferConfig(enabled=True))
+    db = SessionDB(home / "state.db")
+    db.create_session(session_id="old-canonical", source="matrix", model="test")
+    batches = []
+    for index in range(21):
+        event_id = f"$peer-{index}"
+        turn_id = f"$human-{index}"
+        buffer.add(
+            room_id="!room:hs", event_id=event_id, sender="@peer:hs",
+            timestamp=index, body=f"retained-{index}",
+        )
+        batch = buffer.prepare_batch("!room:hs")
+        assert batch and buffer.claim_batch(
+            room_id="!room:hs", batch_id=batch["batch_id"],
+            session_key="old-canonical", turn_key=turn_id,
+        )
+        content = f"peer envelope {index}"
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+        assert buffer.bind_batch_content(
+            room_id="!room:hs", batch_id=batch["batch_id"], content_sha256=content_hash,
+        )
+        db.append_message(
+            session_id="old-canonical", role="user", content=content,
+            platform_message_id=turn_id, display_metadata={"integration": {
+                "integration": "matrix-peer-buffer", "batch_id": batch["batch_id"],
+                "inbound_event_id": turn_id, "content_sha256": content_hash,
+            }},
+        )
+        assert buffer.mark_included(room_id="!room:hs", batch_id=batch["batch_id"])
+        assert buffer.complete_batch(room_id="!room:hs", batch_id=batch["batch_id"], success=True)
+        batches.append(batch["batch_id"])
+    db.close()
+
+    import model_tools
+    model_tools.get_tool_definitions(enabled_toolsets=["hermes-matrix"])
+    tokens = set_session_vars(
+        platform="matrix", chat_id="!room:hs", session_key="matrix:route",
+        session_id="new-canonical", message_id="$new",
+    )
+    try:
+        first_page = __import__("json").loads(model_tools.handle_function_call(
+            "matrix_read_peer_messages", {},
+        ))
+        assert len(first_page["batches"]) == 20
+        assert batches[0] not in {row["batch_id"] for row in first_page["batches"]}
+        second_page = __import__("json").loads(model_tools.handle_function_call(
+            "matrix_read_peer_messages", {"before_batch_id": first_page["next_before_batch_id"]},
+        ))
+        assert [row["batch_id"] for row in second_page["batches"]] == [batches[0]]
+        exact = model_tools.handle_function_call(
+            "matrix_read_peer_messages", {"batch_id": batches[0]},
+        )
+    finally:
+        clear_session_vars(tokens)
+    assert '"body": "retained-0"' in exact
 
 
 def test_real_agent_persists_receipt_before_same_turn_ack_tool(monkeypatch, tmp_path):
@@ -333,10 +415,122 @@ async def test_gated_peer_is_buffered_without_model_call_then_delivered(monkeypa
     adapter.handle_message.assert_awaited_once()
     event = adapter.handle_message.await_args.args[0]
     event = await adapter.prepare_inbound_event(event, "canonical-session", "$human")
-    delivered = event.text
+    delivered = adapter.attach_inbound_context(event, event.text)
     assert "event_id=$blocked" in delivered
     assert "peer hello" in delivered
     assert adapter._peer_message_buffer.pending("!room1:example.org")["messages"]
+
+
+@pytest.mark.asyncio
+async def test_shared_room_prefix_receipt_acks_final_canonical_user_row(monkeypatch, tmp_path):
+    """The receipt follows generic inbound transforms through the real registry ack."""
+    import model_tools
+    import gateway.run_turn as run_turn
+    from gateway.config import Platform
+    from gateway.run_inbound import GatewayInboundMixin
+    from gateway.run_turn import GatewayTurnMixin
+    from gateway.session import SessionSource
+
+    home = tmp_path / "profile"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    adapter = _make_adapter(extra={"peer_message_buffer": {"enabled": True}})
+    adapter._peer_message_buffer = MatrixPeerBuffer(
+        home / "matrix_peer_messages.sqlite3", PeerBufferConfig(enabled=True),
+    )
+    adapter._peer_message_buffer.add(
+        room_id="!room:hs", event_id="$peer", sender="@peer:hs", timestamp=1,
+        body="literal @file:peer-secret.txt",
+    )
+    source = SessionSource(
+        platform=Platform.MATRIX, chat_id="!room:hs", chat_type="group",
+        user_id="@alice:hs", user_name="Alice",
+    )
+    event = __import__("gateway.platforms.base", fromlist=["MessageEvent"]).MessageEvent(
+        text="human turn", source=source, raw_message={}, message_id="$human",
+        media_urls=["/tmp/report.pdf"], media_types=["application/pdf"],
+        reply_to_message_id="$reply", reply_to_text="literal @file:reply-secret.txt",
+    )
+
+    class TestRunner(GatewayTurnMixin, GatewayInboundMixin):
+        pass
+
+    runner = TestRunner()
+    runner.config = SimpleNamespace(
+        group_sessions_per_user=False, thread_sessions_per_user=False, multiplex_profiles=False,
+    )
+    runner._peek_session_state = lambda _key: None
+    runner._adapter_for_source = lambda _source: adapter
+    expanded_inputs = []
+    async def expand_trigger(_source, _key, text):
+        expanded_inputs.append(text)
+        return text.replace("@file:human.txt", "[authorized human reference]")
+    runner._expand_inbound_context_references = AsyncMock(side_effect=expand_trigger)
+    runner.async_session_store = SimpleNamespace(load_transcript=AsyncMock(return_value=[]))
+    runner._hmwa_open_session = AsyncMock(return_value=(False, False))
+    runner._set_session_env = lambda _context: []
+    runner._clear_session_env = lambda _tokens: None
+    runner._pinned_session_context_prompt = lambda *_args: "prompt"
+    runner._hmwa_acquire_turn_lease = AsyncMock()
+    runner._mark_durable_active_turn = AsyncMock()
+    runner._hmwa_run_session_hygiene = AsyncMock(return_value=[])
+    runner._hmwa_first_contact_notes = AsyncMock()
+    runner._voice_channel_sidecar_note = lambda *_args: None
+    runner._bind_adapter_run_generation = lambda *_args: None
+    monkeypatch.setattr(
+        run_turn, "build_session_context",
+        lambda _source, _config, entry: SimpleNamespace(session_id=entry.session_id),
+    )
+    entry = SimpleNamespace(session_id="canonical-session", session_key="matrix:route")
+    event.text = "human turn @file:human.txt"
+    prepared, _tokens = await runner._hmwa_prepare_turn(
+        event, source, entry, "matrix:route", "quick", 1,
+    )
+    canonical_content = (
+        prepared.persist_user_message
+        if prepared.persist_user_message is not None else prepared.message_text
+    )
+    marker = event.raw_message["_persist_user_display_metadata"]
+
+    db = SessionDB(home / "state.db")
+    db.create_session(session_id="canonical-session", source="matrix", model="test")
+    db.append_message(
+        session_id="canonical-session", role="user", content=canonical_content,
+        platform_message_id="$human", display_metadata=marker,
+    )
+    rows = db.get_messages_as_conversation("canonical-session")
+    integration = marker["integration"]
+    assert integration["content_sha256"] == hashlib.sha256(canonical_content.encode()).hexdigest()
+    assert db.has_inbound_integration_receipt(
+        "canonical-session", platform_message_id="$human", integration="matrix-peer-buffer",
+        receipt_id=integration["batch_id"], content_sha256=integration["content_sha256"],
+    )
+    db.close()
+    assert "[Alice] human turn [authorized human reference]" in rows[-1]["content"]
+    assert len(expanded_inputs) == 1
+    assert "[Alice] human turn @file:human.txt" in expanded_inputs[0]
+    assert "report.pdf" in expanded_inputs[0]
+    assert "reply-secret" not in expanded_inputs[0]
+    assert "peer-secret" not in expanded_inputs[0]
+    assert "[authorized human reference]" in rows[-1]["content"]
+    assert "report.pdf" in rows[-1]["content"]
+    assert "literal @file:reply-secret.txt" in rows[-1]["content"]
+    assert "literal @file:peer-secret.txt" in rows[-1]["content"]
+
+    from hermes_cli.plugins import discover_plugins
+    discover_plugins(force=True)
+    model_tools.get_tool_definitions(enabled_toolsets=["hermes-matrix"])
+    tokens = set_session_vars(
+        platform="matrix", chat_id="!room:hs", session_key="matrix:route",
+        session_id="canonical-session", message_id="$human",
+    )
+    try:
+        acknowledged = model_tools.handle_function_call(
+            "matrix_ack_peer_messages", {"batch_id": marker["integration"]["batch_id"]},
+        )
+    finally:
+        clear_session_vars(tokens)
+    assert '"ok": true' in acknowledged
+    assert not adapter._peer_message_buffer.pending("!room:hs")["messages"]
 
 
 @pytest.mark.asyncio
@@ -444,8 +638,9 @@ async def test_auto_clear_happens_only_after_successful_turn(monkeypatch, tmp_pa
     await adapter._on_room_message(_make_event("@hermes:example.org go", sender="@alice:example.org", event_id="$ok"))
     batch_event = adapter.handle_message.await_args.args[0]
     batch_event = await adapter.prepare_inbound_event(batch_event, "canonical-session", "$ok")
+    canonical_content = adapter.attach_inbound_context(batch_event, batch_event.text)
+    adapter.bind_inbound_persistence_content(batch_event, canonical_content)
     await adapter.on_processing_start(batch_event)
-    await adapter.on_processing_complete(batch_event, __import__("gateway.platforms.base", fromlist=["ProcessingOutcome"]).ProcessingOutcome.SUCCESS)
     assert adapter._peer_message_buffer.pending("!room1:example.org")["messages"]
     assert adapter._peer_message_buffer.claim_batch(
         room_id="!room1:example.org",
@@ -454,18 +649,17 @@ async def test_auto_clear_happens_only_after_successful_turn(monkeypatch, tmp_pa
     )
     marker = batch_event.raw_message["_persist_user_display_metadata"]
     integration = marker["integration"]
-    assert adapter._peer_message_buffer.bind_batch_content(
-        room_id="!room1:example.org", batch_id=integration["batch_id"],
-        content_sha256=integration["content_sha256"],
-    )
     db = SessionDB(home / "state.db")
     db.create_session(session_id="canonical-session", source="matrix", model="test")
     db.append_message(
-        session_id="canonical-session", role="user", content=batch_event.text,
+        session_id="canonical-session", role="user", content=canonical_content,
         platform_message_id="$ok", display_metadata=marker,
     )
     db.close()
-    batch_event.raw_message["_inbound_model_turn_succeeded"] = True
+    from gateway.response_filters import is_intentional_silence_agent_result
+    batch_event.raw_message["_inbound_model_turn_succeeded"] = (
+        is_intentional_silence_agent_result({"failed": False}, "NO_REPLY")
+    )
     await adapter.on_processing_complete(batch_event, __import__("gateway.platforms.base", fromlist=["ProcessingOutcome"]).ProcessingOutcome.SUCCESS)
     assert not adapter._peer_message_buffer.pending("!room1:example.org")["messages"]
 
@@ -478,7 +672,7 @@ async def test_auto_clear_happens_only_after_successful_turn(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_durable_receipt_does_not_auto_clear_failed_model_turn(tmp_path, monkeypatch):
+async def test_durable_receipt_does_not_auto_clear_failed_no_reply_turn(tmp_path, monkeypatch):
     home = tmp_path / "profile"
     monkeypatch.setenv("HERMES_HOME", str(home))
     adapter = _make_adapter(extra={"peer_message_buffer": {"enabled": True, "auto_clear": True}})
@@ -508,12 +702,15 @@ async def test_durable_receipt_does_not_auto_clear_failed_model_turn(tmp_path, m
         platform_message_id="$human", display_metadata=marker,
     )
     db.close()
+    from gateway.response_filters import is_intentional_silence_agent_result
     event = SimpleNamespace(
         message_id="$human", source=SimpleNamespace(chat_id="!room1:example.org"),
         raw_message={
             "_matrix_peer_batch_id": batch["batch_id"],
             "_persisted_integration_receipt": True,
-            "_inbound_model_turn_succeeded": False,
+            "_inbound_model_turn_succeeded": is_intentional_silence_agent_result(
+                {"failed": True}, "NO_REPLY",
+            ),
         },
     )
     outcome = __import__("gateway.platforms.base", fromlist=["ProcessingOutcome"]).ProcessingOutcome.SUCCESS
@@ -570,12 +767,14 @@ async def test_committed_sessiondb_user_row_proves_matrix_receipt_after_reopen(t
     event = await adapter.prepare_inbound_event(
         adapter.handle_message.await_args.args[0], "canonical-session", "$turn",
     )
+    canonical_content = adapter.attach_inbound_context(event, event.text)
+    adapter.bind_inbound_persistence_content(event, canonical_content)
     marker = event.raw_message["_persist_user_display_metadata"]
     db = SessionDB(tmp_path / "profile" / "state.db")
     try:
         db.create_session(session_id="canonical-session", source="matrix", model="test")
         db.append_message(
-            session_id="canonical-session", role="user", content=event.text,
+            session_id="canonical-session", role="user", content=canonical_content,
             display_metadata=marker, platform_message_id="$turn",
         )
         db.close()
@@ -636,7 +835,7 @@ async def test_dead_process_claim_without_receipt_is_reclaimed(tmp_path, monkeyp
     event = adapter.handle_message.await_args.args[0]
     prepared = await adapter.prepare_inbound_event(event, "new-session", "$new")
     assert prepared.raw_message["_matrix_peer_batch_id"] == batch["batch_id"]
-    assert "event_id=$peer" in prepared.text
+    assert "event_id=$peer" in adapter.attach_inbound_context(prepared, prepared.text)
 
 
 @pytest.mark.asyncio
