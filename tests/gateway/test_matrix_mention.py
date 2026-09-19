@@ -315,12 +315,14 @@ class TestPeerAgentBudgetGating:
             monkeypatch.setenv("MATRIX_ALLOWED_ROOMS", allowed_rooms)
             adapter._allowed_rooms = {allowed_rooms}
             adapter._allowed_room_ids = {allowed_rooms}
+        adapter._peer_reply_budget_remaining[room_id] = 1
 
         await adapter._on_room_message(
             _make_event("continue the discussion", sender=sender, room_id=room_id)
         )
 
         adapter.handle_message.assert_not_awaited()
+        assert adapter._peer_reply_budget_remaining[room_id] == 1
 
     @pytest.mark.asyncio
     async def test_untagged_peer_is_dropped_without_consuming_budget(self, monkeypatch):
