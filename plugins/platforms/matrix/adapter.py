@@ -3183,7 +3183,7 @@ def _apply_yaml_config(yaml_cfg: dict, matrix_cfg: dict) -> dict | None:
     """``apply_yaml_config_fn`` (#24849): config.yaml matrix: keys → MATRIX_* env (env wins; skipped under a
     multiplexed secondary profile's scope) + ``PlatformConfig.extra`` (extra-first readers)."""
     seeded = _apply_yaml_bridge(matrix_cfg, _YAML_BRIDGE) or {}
-    for key in ("peer_agent_ids", "peer_reply_budget_per_human_message"):
+    for key in ("peer_agent_ids", "peer_reply_budget_per_human_message", "peer_require_mention"):
         if key in matrix_cfg:
             seeded[key] = matrix_cfg[key]
     return seeded or None

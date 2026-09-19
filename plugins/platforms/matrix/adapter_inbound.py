@@ -45,6 +45,9 @@ class MatrixInboundMixin:
         except (TypeError, ValueError):
             peer_budget = 0
         self._peer_reply_budget_per_human_message = max(0, peer_budget)
+        self._peer_require_mention = self._configured_bool(config, "peer_require_mention")
+        if self._peer_require_mention is None:
+            self._peer_require_mention = True
         self._peer_reply_budget_remaining: dict[str, int] = {}
 
     def _admit_peer_room_message(
@@ -60,7 +63,7 @@ class MatrixInboundMixin:
             if authorized:
                 self._peer_reply_budget_remaining[room_id] = self._peer_reply_budget_per_human_message
             return True
-        if not authorized or not is_mentioned:
+        if not authorized or (self._peer_require_mention and not is_mentioned):
             return False
         remaining = self._peer_reply_budget_remaining.get(room_id, 0)
         if remaining <= 0:
@@ -93,7 +96,8 @@ class MatrixInboundMixin:
                 return None
             is_free_room = room_id in self._free_rooms
             in_bot_thread = bool(thread_id and thread_id in self._threads)
-            if self._require_mention and not is_free_room and not in_bot_thread:
+            if (self._require_mention and not is_free_room and not in_bot_thread
+                    and not (is_peer_agent_message and not self._peer_require_mention)):
                 if not is_mentioned and not body.startswith("/"):
                     if voice_gate is not None:  # parkable voice: a bare @mention may follow (Element X)
                         self._parked_voices.park(room_id, sender, voice_gate, event_id, source_content, relates_to)

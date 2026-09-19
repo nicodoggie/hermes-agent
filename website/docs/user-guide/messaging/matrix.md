@@ -97,6 +97,8 @@ matrix:
     - "!abc123:matrix.org"
   peer_agent_ids:                 # Peer bots that must mention this bot to wake it
     - "@other-agent:matrix.org"
+  peer_require_mention: true      # Require mentions from configured peers (default: true)
+  peer_require_mention: true
   peer_reply_budget_per_human_message: 2  # Peer-triggered calls opened by each authorized human message
   ignore_user_patterns:           # Bridge/appservice ghost users to ignore
     - "^@telegram_"
@@ -151,6 +153,7 @@ matrix:
     - "@yomi:matrix.org"
   peer_agent_ids:
     - "@yomi:matrix.org"  # Ran's profile; Yomi lists Ran instead
+  peer_require_mention: true
   peer_reply_budget_per_human_message: 2
 ```
 
@@ -161,7 +164,7 @@ With peer-agent gating enabled:
 - authorized non-peer messages open a new per-receiver, per-room round and reset the peer-event
   allowance;
 - peer messages require a direct mention of the current bot even though ordinary
-  human messages do not;
+  human messages do not, unless `peer_require_mention: false` is explicitly set;
 - each admitted peer event consumes one slot before downstream execution;
   a later `NO_REPLY` does not refund it, and commands, later refusals or failures
   can consume a slot without a provider call;

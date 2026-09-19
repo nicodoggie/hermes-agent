@@ -110,6 +110,7 @@ class TestPeerAgentBudgetConfig:
 
         assert adapter._peer_agent_ids == set()
         assert adapter._peer_reply_budget_per_human_message == 0
+        assert adapter._peer_require_mention is True
         assert adapter._peer_reply_budget_remaining == {}
 
     def test_parses_peer_ids_from_list(self):
@@ -140,6 +141,11 @@ class TestPeerAgentBudgetConfig:
         }
         assert adapter._peer_reply_budget_per_human_message == 3
 
+    def test_peer_require_mention_can_be_disabled(self):
+        adapter = _make_adapter(extra={"peer_require_mention": False})
+
+        assert adapter._peer_require_mention is False
+
     @pytest.mark.parametrize("value", [-1, "invalid", None])
     def test_invalid_budget_fails_closed(self, value):
         adapter = _make_adapter(
@@ -154,7 +160,7 @@ class TestPeerAgentBudgetConfig:
 
 class TestPeerAgentBudgetGating:
     @staticmethod
-    def _adapter(monkeypatch, *, require_mention=False):
+    def _adapter(monkeypatch, *, require_mention=False, peer_require_mention=True):
         monkeypatch.setenv(
             "MATRIX_ALLOWED_USERS",
             "@alice:example.org,@hermes:example.org,@yomi:example.org",
@@ -167,6 +173,7 @@ class TestPeerAgentBudgetGating:
             extra={
                 "peer_agent_ids": ["@yomi:example.org"],
                 "peer_reply_budget_per_human_message": 2,
+                "peer_require_mention": peer_require_mention,
             }
         )
 
@@ -262,6 +269,16 @@ class TestPeerAgentBudgetGating:
         other_receiver.handle_message.assert_awaited_once()
         assert receiver._peer_reply_budget_remaining == {room_id: 2, "!other:example.org": 1}
         assert other_receiver._peer_reply_budget_remaining == {room_id: 1, "!other:example.org": 1}
+
+    @pytest.mark.asyncio
+    async def test_untagged_trusted_peer_can_bypass_mention_when_configured(self, monkeypatch):
+        adapter = self._adapter(monkeypatch, require_mention=True, peer_require_mention=False)
+        adapter._peer_reply_budget_remaining["!room1:example.org"] = 1
+        await adapter._on_room_message(
+            _make_event("continue the discussion", sender="@yomi:example.org")
+        )
+        adapter.handle_message.assert_awaited_once()
+        assert adapter._peer_reply_budget_remaining["!room1:example.org"] == 0
 
     @pytest.mark.asyncio
     async def test_untagged_peer_is_dropped_without_consuming_budget(self, monkeypatch):
