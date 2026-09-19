@@ -2029,9 +2029,9 @@ class MatrixAdapter(MatrixInboundMixin, BasePlatformAdapter):
             room_id=room_id, event_id=event_id, sender=sender,
             timestamp=float(event_ts or time.time()), body=body)
 
-    def _prepend_peer_buffer(self, room_id: str, body: str) -> tuple[str, dict | None]:
+    def _prepend_peer_buffer(self, room_id: str, body: str, batch: dict | None = None) -> tuple[str, dict | None]:
         """Add one durable, retryable batch as inert quoted data."""
-        batch = self._peer_message_buffer.prepare_batch(room_id)
+        batch = batch or self._peer_message_buffer.prepare_batch(room_id)
         if not batch:
             return body, None
         pending = self._peer_message_buffer.pending(room_id)
@@ -2048,6 +2048,56 @@ class MatrixAdapter(MatrixInboundMixin, BasePlatformAdapter):
                 f"event_id={message['event_id']}]\n{message['body']}\n[/peer]")
         lines.append("[End Matrix peer messages]")
         return "\n".join(lines) + "\n\n" + body, batch
+
+    async def prepare_inbound_event(
+        self, event: MessageEvent, canonical_session_id: str, turn_key: str,
+    ) -> MessageEvent:
+        """Reserve peer context only after the gateway resolved the real SessionDB id."""
+        if event.message_type == MessageType.COMMAND:
+            return event
+        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        if raw.get("_matrix_peer_batch_id"):
+            return event
+        room_id = event.source.chat_id if event.source else ""
+        batch = self._peer_message_buffer.prepare_batch(room_id)
+        if not batch:
+            return event
+        claimed = self._peer_message_buffer.claim_batch(
+            room_id=room_id, batch_id=batch["batch_id"],
+            session_key=canonical_session_id, turn_key=turn_key,
+        )
+        if not claimed:
+            return event
+        augmented, _ = self._prepend_peer_buffer(room_id, event.text, batch=batch)
+        marker = {
+            "integration": "matrix-peer-buffer",
+            "batch_id": batch["batch_id"],
+            "room_id": room_id,
+            "event_ids": list(batch["event_ids"]),
+            "reservation_generation": int(batch.get("reservation_generation", 0)),
+        }
+        new_raw = dict(raw)
+        new_raw["_matrix_peer_batch_id"] = batch["batch_id"]
+        new_raw["_persist_user_display_metadata"] = {"integration": marker}
+        event.text = augmented
+        event.raw_message = new_raw
+        return event
+
+    def inbound_persistence_confirmed(self, event: MessageEvent, transcript: list[dict]) -> bool:
+        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        batch_id = raw.get("_matrix_peer_batch_id")
+        if not batch_id:
+            return False
+        for row in reversed(transcript or []):
+            metadata = row.get("display_metadata") if isinstance(row, dict) else None
+            integration = metadata.get("integration") if isinstance(metadata, dict) else None
+            if isinstance(integration, dict) and integration.get("batch_id") == batch_id:
+                raw["_persisted_integration_receipt"] = True
+                self._peer_message_buffer.mark_included(
+                    room_id=event.source.chat_id, batch_id=str(batch_id),
+                )
+                return True
+        return False
 
     async def _on_room_message(self, event: Any) -> None:
         room_id = str(getattr(event, "room_id", ""))
@@ -2127,7 +2177,6 @@ class MatrixAdapter(MatrixInboundMixin, BasePlatformAdapter):
         if ctx is None:
             return None
         body, _is_dm, _chat_type, _thread_id, display_name, source = ctx
-        body, peer_batch = self._prepend_peer_buffer(room_id, body)
         body, reply_to, reply_to_text, reply_to_author_id, reply_to_author_name = (
             await self._extract_reply_context(room_id, body, relates_to))
         media_msgtype = extra.pop("media_msgtype", None)
@@ -2138,7 +2187,6 @@ class MatrixAdapter(MatrixInboundMixin, BasePlatformAdapter):
         elif _is_bare_media_filename(media_msgtype, body):
             body = ""  # transport filename, not user text
         raw_message = dict(source_content)
-        raw_message["_matrix_peer_batch_id"] = peer_batch["batch_id"] if peer_batch else None
         return MessageEvent(
             text=body, source=source, raw_message=raw_message, message_id=event_id,
             reply_expected=self._matrix_reply_expected(
@@ -2447,13 +2495,10 @@ class MatrixAdapter(MatrixInboundMixin, BasePlatformAdapter):
     async def on_processing_start(self, event: MessageEvent) -> None:
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         batch_id = raw.get("_matrix_peer_batch_id")
-        if batch_id:
-            self._peer_message_buffer.claim_batch(
-                room_id=event.source.chat_id,
-                batch_id=str(batch_id),
-                session_key=get_session_env("HERMES_SESSION_KEY") or self._event_session_key(event),
-                turn_key=str(event.message_id or ""),
-            )
+        # Reservation and claim happen at canonical session resolution. The lifecycle
+        # callback must not re-claim under the route key or steal a concurrent turn.
+        if batch_id and not raw.get("_persisted_integration_receipt"):
+            logger.debug("Matrix peer batch %s awaiting durable transcript receipt", batch_id)
         msg_id, room_id = event.message_id, event.source.chat_id
         if self._reactions_enabled and msg_id and room_id:
             reaction_event_id = await self._send_reaction(room_id, msg_id, "\U0001f440")
@@ -2464,7 +2509,8 @@ class MatrixAdapter(MatrixInboundMixin, BasePlatformAdapter):
         msg_id, room_id = event.message_id, event.source.chat_id
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         batch_id = raw.get("_matrix_peer_batch_id")
-        if batch_id:
+        if batch_id and raw.get("_persisted_integration_receipt"):
+            self._peer_message_buffer.mark_included(room_id=room_id, batch_id=str(batch_id))
             self._peer_message_buffer.complete_batch(
                 room_id=room_id,
                 batch_id=str(batch_id),

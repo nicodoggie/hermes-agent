@@ -365,7 +365,7 @@ class GatewayTurnPersistenceMixin:
             _user_entry["display_kind"] = prepared.persist_user_display_kind
         from gateway.response_filters import display_metadata_for_event
         display_metadata = {**({"gateway_input_owner": prepared.persistence_owner} if prepared.persistence_owner else {}),
-                            **display_metadata_for_event(event)}
+                            **(prepared.persist_user_display_metadata or {}), **display_metadata_for_event(event)}
         if display_metadata:
             _user_entry["display_metadata"] = display_metadata
         if getattr(event, "message_id", None):

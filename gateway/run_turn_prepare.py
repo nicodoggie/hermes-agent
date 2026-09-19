@@ -599,6 +599,7 @@ class GatewayTurnPrepareMixin:
         persistence_session_id: Optional[str] = None
         persistence_owner: Optional[str] = None
         title_user_message: Optional[str] = None
+        persist_user_display_metadata: Optional[dict] = None
 
     async def _hmwa_prepare_turn(self, event, source, session_entry, session_key, _quick_key, run_generation):
         """Everything between session resolution and the agent run: session open, task-local env,
@@ -673,6 +674,13 @@ class GatewayTurnPrepareMixin:
         if _vc_note:
             turn_sidecar_notes.append(_vc_note)
 
+        adapter = self._intake_adapter_for(source)
+        if adapter is not None:
+            event = await adapter.prepare_inbound_event(
+                event, session_entry.session_id, str(event.message_id or run_generation or "turn"))
+            if event is None:
+                return None, _session_env_tokens
+
         # Auto-analyze user images so the model gets a description plus the local path.
         message_text = await self._prepare_profile_scoped_inbound_message_text(
             event=event, source=source, history=history, session_key=session_key,
@@ -704,4 +712,6 @@ class GatewayTurnPrepareMixin:
             history, context_prompt, message_text, persist_user_message, persist_user_timestamp,
             persist_user_display_kind, session_entry.session_id, owner,
             title_user_message=title_user_message,
+            persist_user_display_metadata=(event.raw_message or {}).get("_persist_user_display_metadata")
+            if isinstance(event.raw_message, dict) else None,
         ), _session_env_tokens

@@ -3478,6 +3478,18 @@ class BasePlatformAdapter(ABC):
     async def on_processing_start(self, event: MessageEvent) -> None:
         """Hook called when background processing begins."""
 
+    async def prepare_inbound_event(
+        self, event: MessageEvent, canonical_session_id: str, turn_key: str,
+    ) -> MessageEvent:
+        """Bind optional adapter context after canonical session resolution."""
+        del canonical_session_id, turn_key
+        return event
+
+    def inbound_persistence_confirmed(self, event: MessageEvent, transcript: list[dict]) -> bool:
+        """Return whether an inbound integration receipt is in the committed transcript."""
+        del event, transcript
+        return False
+
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
         """Hook called when background processing completes. Default: opt-in reaction ack — with
         ``_OK_EMOJI``/``_FAIL_EMOJI`` set and ``_add_reaction``/``_remove_reaction`` present, swap

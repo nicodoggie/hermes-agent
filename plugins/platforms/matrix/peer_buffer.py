@@ -70,7 +70,11 @@ class MatrixPeerBuffer:
                         state TEXT NOT NULL CHECK(state IN ('in_flight', 'delivered', 'acknowledged')),
                         claimed INTEGER NOT NULL DEFAULT 0,
                         session_key TEXT,
-                        turn_key TEXT
+                        turn_key TEXT,
+                        ack_count INTEGER NOT NULL DEFAULT 0,
+                        reservation_generation INTEGER NOT NULL DEFAULT 0,
+                        included INTEGER NOT NULL DEFAULT 0,
+                        created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
                     );
                     """
                 )
@@ -87,6 +91,10 @@ class MatrixPeerBuffer:
                     ("claimed", "INTEGER NOT NULL DEFAULT 0"),
                     ("session_key", "TEXT"),
                     ("turn_key", "TEXT"),
+                    ("ack_count", "INTEGER NOT NULL DEFAULT 0"),
+                    ("reservation_generation", "INTEGER NOT NULL DEFAULT 0"),
+                    ("included", "INTEGER NOT NULL DEFAULT 0"),
+                    ("created_at", "REAL NOT NULL DEFAULT 0"),
                 ):
                     if name not in batch_columns:
                         db.execute(f"ALTER TABLE peer_batches ADD COLUMN {name} {definition}")
@@ -174,7 +182,7 @@ class MatrixPeerBuffer:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute(
                 "SELECT batch_id,event_ids,omitted_count FROM peer_batches "
-                "WHERE room_id=? AND state='in_flight' AND claimed=0 ORDER BY rowid DESC LIMIT 1", (room_id,)
+                "WHERE room_id=? AND state='in_flight' ORDER BY rowid DESC LIMIT 1", (room_id,)
             ).fetchone()
             if existing:
                 return {
@@ -200,6 +208,11 @@ class MatrixPeerBuffer:
                 "INSERT OR IGNORE INTO peer_batches "
                 "(batch_id,room_id,event_ids,omitted_count,state,claimed) VALUES (?,?,?,?,?,0)",
                 (batch_id, room_id, json.dumps(event_ids), omitted, "in_flight"),
+            )
+            db.execute(
+                "DELETE FROM peer_batches WHERE room_id=? AND state='acknowledged' AND rowid NOT IN "
+                "(SELECT rowid FROM peer_batches WHERE room_id=? ORDER BY rowid DESC LIMIT 256)",
+                (room_id, room_id),
             )
             db.commit()
         return {"batch_id": batch_id, "event_ids": event_ids, "omitted_count": omitted}
@@ -232,16 +245,22 @@ class MatrixPeerBuffer:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             batch = db.execute(
-                "SELECT event_ids,omitted_count,state,claimed FROM peer_batches WHERE batch_id=? AND room_id=?",
+                "SELECT event_ids,omitted_count,state,claimed,ack_count,included FROM peer_batches WHERE batch_id=? AND room_id=?",
                 (batch_id, room_id),
             ).fetchone()
             if not batch:
                 db.rollback()
                 return False
+            if batch["state"] == "acknowledged":
+                db.commit()
+                return True
             if batch["state"] != "in_flight":
                 db.commit()
                 return True
             if not batch["claimed"]:
+                db.rollback()
+                return False
+            if success and not batch["included"]:
                 db.rollback()
                 return False
             if not success:
@@ -270,7 +289,8 @@ class MatrixPeerBuffer:
                         f"DELETE FROM peer_messages WHERE room_id=? AND event_id IN ({placeholders})",
                         (room_id, *ids),
                     )
-                db.execute("UPDATE peer_batches SET state='acknowledged' WHERE batch_id=?", (batch_id,))
+                db.execute("UPDATE peer_batches SET state='acknowledged',ack_count=? WHERE batch_id=?",
+                           (len(ids), batch_id))
             db.commit()
         return True
 
@@ -279,10 +299,14 @@ class MatrixPeerBuffer:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             batch = db.execute(
-                "SELECT event_ids,omitted_count,state,claimed,session_key FROM peer_batches WHERE batch_id=? AND room_id=?",
+                "SELECT event_ids,omitted_count,state,claimed,session_key,ack_count,included FROM peer_batches WHERE batch_id=? AND room_id=?",
                 (batch_id, room_id),
             ).fetchone()
+            if batch and batch["state"] == "acknowledged":
+                db.commit()
+                return int(batch["ack_count"])
             if (not batch or batch["state"] not in {"in_flight", "delivered"}
+                    or not batch["included"]
                     or not batch["claimed"] or (session_key and batch["session_key"] != session_key)):
                 db.rollback()
                 raise ValueError("unknown or undelivered Matrix peer batch")
@@ -299,7 +323,8 @@ class MatrixPeerBuffer:
                 )
             else:
                 count = 0
-            db.execute("UPDATE peer_batches SET state='acknowledged' WHERE batch_id=?", (batch_id,))
+            db.execute("UPDATE peer_batches SET state='acknowledged',ack_count=? WHERE batch_id=?",
+                       (int(count), batch_id))
             db.execute(
                 "UPDATE peer_buffer_meta SET delivered_omitted_count=MAX(delivered_omitted_count, ?) "
                 "WHERE room_id=?",
@@ -307,6 +332,16 @@ class MatrixPeerBuffer:
             )
             db.commit()
         return int(count)
+
+    def mark_included(self, *, room_id: str, batch_id: str) -> bool:
+        """Record the read-back proof that the exact user row committed."""
+        with self._connect() as db:
+            updated = db.execute(
+                "UPDATE peer_batches SET included=1 WHERE room_id=? AND batch_id=? AND state='in_flight' AND claimed=1",
+                (room_id, batch_id),
+            ).rowcount
+            db.commit()
+        return bool(updated)
 
     def acknowledge(self, *, room_id: str, event_ids: Iterable[str]) -> int:
         """Compatibility guard: acknowledgements must use a batch identity."""
