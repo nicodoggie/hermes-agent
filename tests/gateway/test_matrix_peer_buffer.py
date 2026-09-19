@@ -1,11 +1,15 @@
 """Contract tests for durable Matrix peer-message buffering."""
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
 from plugins.platforms.matrix.peer_buffer import MatrixPeerBuffer, PeerBufferConfig
 from plugins.platforms.matrix import _ack_peer_messages
 from hermes_state import SessionDB
+from gateway.session_context import clear_session_vars, set_session_vars
 from tests.gateway.test_matrix_mention import _make_adapter, _make_event
 
 
@@ -94,7 +98,7 @@ def test_successful_non_auto_clear_batch_is_not_reappended_but_failure_retries(t
     assert next_batch and next_batch["event_ids"] == ["$2"]
 
 
-def test_ack_tool_is_current_matrix_room_scoped(monkeypatch, tmp_path):
+def test_ack_tool_rejects_route_key_without_canonical_session(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
     monkeypatch.setenv("HERMES_SESSION_PLATFORM", "matrix")
     monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "!room:hs")
@@ -105,7 +109,130 @@ def test_ack_tool_is_current_matrix_room_scoped(monkeypatch, tmp_path):
     assert buffer.claim_batch(room_id="!room:hs", batch_id=batch["batch_id"], session_key="matrix:!room:hs", turn_key="$turn")
     assert buffer.mark_included(room_id="!room:hs", batch_id=batch["batch_id"])
     result = _ack_peer_messages({"batch_id": batch["batch_id"]})
+    assert '"ok": false' in result
+    assert buffer.pending("!room:hs")["messages"]
+
+
+def test_ack_tool_uses_canonical_session_and_committed_exact_receipt(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
+    buffer = MatrixPeerBuffer(tmp_path / "profile" / "matrix_peer_messages.sqlite3", PeerBufferConfig(enabled=True))
+    buffer.add(room_id="!room:hs", event_id="$peer", sender="@a:hs", timestamp=1, body="x")
+    batch = buffer.prepare_batch("!room:hs")
+    assert batch
+    assert buffer.claim_batch(
+        room_id="!room:hs", batch_id=batch["batch_id"],
+        session_key="canonical-session", turn_key="$human",
+    )
+    assert buffer.bind_batch_content(
+        room_id="!room:hs", batch_id=batch["batch_id"],
+        content_sha256=hashlib.sha256(b"augmented").hexdigest(),
+    )
+    receipt = {
+        "integration": "matrix-peer-buffer", "batch_id": batch["batch_id"],
+        "room_id": "!room:hs", "event_ids": ["$peer"],
+        "inbound_event_id": "$human",
+        "content_sha256": hashlib.sha256(b"augmented").hexdigest(),
+    }
+    db = SessionDB(tmp_path / "profile" / "state.db")
+    db.create_session(session_id="canonical-session", source="matrix", model="test")
+    db.append_message(
+        session_id="canonical-session", role="user", content="augmented",
+        platform_message_id="$human", display_metadata={"integration": receipt},
+    )
+    db.close()
+    tokens = set_session_vars(
+        platform="matrix", chat_id="!room:hs", session_key="matrix:route",
+        session_id="canonical-session", message_id="$human",
+    )
+    try:
+        result = _ack_peer_messages({"batch_id": batch["batch_id"]})
+    finally:
+        clear_session_vars(tokens)
     assert '"ok": true' in result
+    assert not buffer.pending("!room:hs")["messages"]
+
+
+def test_real_agent_persists_receipt_before_same_turn_ack_tool(monkeypatch, tmp_path):
+    """Real AIAgent loop: pre-LLM DB commit, tool call, then completion."""
+    from run_agent import AIAgent
+    from plugins.platforms.matrix.tools import _ack_peer_messages as real_ack
+
+    home = tmp_path / "profile"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    buffer = MatrixPeerBuffer(home / "matrix_peer_messages.sqlite3", PeerBufferConfig(enabled=True))
+    buffer.add(room_id="!room:hs", event_id="$peer", sender="@peer:hs", timestamp=1, body="context")
+    batch = buffer.prepare_batch("!room:hs")
+    assert batch and buffer.claim_batch(
+        room_id="!room:hs", batch_id=batch["batch_id"],
+        session_key="canonical-session", turn_key="$human",
+    )
+    augmented = "peer envelope\n\nhuman turn"
+    content_hash = hashlib.sha256(augmented.encode()).hexdigest()
+    assert buffer.bind_batch_content(
+        room_id="!room:hs", batch_id=batch["batch_id"], content_sha256=content_hash,
+    )
+    marker = {"integration": {
+        "integration": "matrix-peer-buffer", "batch_id": batch["batch_id"],
+        "room_id": "!room:hs", "event_ids": ["$peer"],
+        "inbound_event_id": "$human", "content_sha256": content_hash,
+    }}
+
+    class Completions:
+        calls = 0
+
+        def create(self, **_kwargs):
+            type(self).calls += 1
+            if type(self).calls == 1:
+                call = SimpleNamespace(
+                    id="ack-1", type="function",
+                    function=SimpleNamespace(
+                        name="matrix_ack_peer_messages",
+                        arguments=f'{{"batch_id":"{batch["batch_id"]}"}}',
+                    ),
+                )
+                message = SimpleNamespace(content=None, reasoning=None, tool_calls=[call])
+                finish = "tool_calls"
+            else:
+                message = SimpleNamespace(content="done", reasoning=None, tool_calls=[])
+                finish = "stop"
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message, finish_reason=finish)], usage=None,
+            )
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    monkeypatch.setattr("agent.process_bootstrap.OpenAI", lambda **_kwargs: client)
+    monkeypatch.setattr("model_tools.get_tool_definitions", lambda *_a, **_k: [{
+        "type": "function", "function": {
+            "name": "matrix_ack_peer_messages", "description": "ack",
+            "parameters": {"type": "object", "properties": {"batch_id": {"type": "string"}}},
+        },
+    }])
+    monkeypatch.setattr(
+        "model_tools.handle_function_call",
+        lambda name, args, *_pos, **_kwargs: real_ack(args) if name == "matrix_ack_peer_messages" else "{}",
+    )
+    tokens = set_session_vars(
+        platform="matrix", chat_id="!room:hs", session_key="matrix:route",
+        session_id="canonical-session", message_id="$human",
+    )
+    db = SessionDB(home / "state.db")
+    try:
+        agent = AIAgent(
+            model="test-model", api_key="test", base_url="acp://fake",
+            provider="openai-compat", platform="matrix", session_id="canonical-session",
+            session_db=db, max_iterations=3, quiet_mode=True,
+            skip_context_files=True, skip_memory=True, save_trajectories=False,
+        )
+        agent._title_generated = True
+        agent.valid_tool_names = {"matrix_ack_peer_messages"}
+        result = agent.run_conversation(
+            augmented, conversation_history=[], task_id="canonical-session",
+            persist_user_platform_id="$human", persist_user_display_metadata=marker,
+        )
+    finally:
+        clear_session_vars(tokens)
+        db.close()
+    assert result["final_response"] == "done"
     assert not buffer.pending("!room:hs")["messages"]
 
 
@@ -180,6 +307,7 @@ async def test_auto_clear_happens_only_after_successful_turn(monkeypatch, tmp_pa
     await adapter.on_processing_complete(batch_event, __import__("gateway.platforms.base", fromlist=["ProcessingOutcome"]).ProcessingOutcome.SUCCESS)
     assert adapter._peer_message_buffer.pending("!room1:example.org")["messages"]
     batch_event.raw_message["_persisted_integration_receipt"] = True
+    batch_event.raw_message["_inbound_model_turn_succeeded"] = True
     await adapter.on_processing_complete(batch_event, __import__("gateway.platforms.base", fromlist=["ProcessingOutcome"]).ProcessingOutcome.SUCCESS)
     assert not adapter._peer_message_buffer.pending("!room1:example.org")["messages"]
 
@@ -189,6 +317,34 @@ async def test_auto_clear_happens_only_after_successful_turn(monkeypatch, tmp_pa
     with pytest.raises(RuntimeError):
         await adapter._on_room_message(_make_event("@hermes:example.org retry", sender="@alice:example.org", event_id="$fail"))
     assert adapter._peer_message_buffer.pending("!room1:example.org")["messages"]
+
+
+@pytest.mark.asyncio
+async def test_durable_receipt_does_not_auto_clear_failed_model_turn(tmp_path):
+    adapter = _make_adapter(extra={"peer_message_buffer": {"enabled": True, "auto_clear": True}})
+    adapter._peer_message_buffer = MatrixPeerBuffer(
+        tmp_path / "state.sqlite3", PeerBufferConfig(enabled=True, auto_clear=True))
+    store = adapter._peer_message_buffer
+    store.add(room_id="!room1:example.org", event_id="$peer", sender="@peer:hs", timestamp=1, body="x")
+    batch = store.prepare_batch("!room1:example.org")
+    assert batch and store.claim_batch(
+        room_id="!room1:example.org", batch_id=batch["batch_id"],
+        session_key="canonical", turn_key="$human",
+    )
+    assert store.bind_batch_content(
+        room_id="!room1:example.org", batch_id=batch["batch_id"], content_sha256="1" * 64,
+    )
+    event = SimpleNamespace(
+        message_id="$human", source=SimpleNamespace(chat_id="!room1:example.org"),
+        raw_message={
+            "_matrix_peer_batch_id": batch["batch_id"],
+            "_persisted_integration_receipt": True,
+            "_inbound_model_turn_succeeded": False,
+        },
+    )
+    outcome = __import__("gateway.platforms.base", fromlist=["ProcessingOutcome"]).ProcessingOutcome.SUCCESS
+    await adapter.on_processing_complete(event, outcome)
+    assert store.pending("!room1:example.org")["messages"]
 
 
 @pytest.mark.asyncio
@@ -219,8 +375,26 @@ async def test_committed_sessiondb_user_row_proves_matrix_receipt_after_reopen(t
         reopened = SessionDB(tmp_path / "profile" / "state.db")
         try:
             rows = reopened.get_messages_as_conversation("canonical-session")
-            assert adapter.inbound_persistence_confirmed(event, rows)
+            integration = marker["integration"]
+            committed = reopened.has_inbound_integration_receipt(
+                "canonical-session", platform_message_id="$turn",
+                integration="matrix-peer-buffer",
+                receipt_id=integration["batch_id"],
+                content_sha256=integration["content_sha256"],
+            )
+            assert adapter.inbound_persistence_confirmed(event, committed)
             assert rows[-1]["display_metadata"]["integration"]["batch_id"] == marker["integration"]["batch_id"]
+            assert not reopened.has_inbound_integration_receipt(
+                "canonical-session", platform_message_id="$wrong",
+                integration="matrix-peer-buffer",
+                receipt_id=integration["batch_id"],
+                content_sha256=integration["content_sha256"],
+            )
+            assert not reopened.has_inbound_integration_receipt(
+                "canonical-session", platform_message_id="$turn",
+                integration="matrix-peer-buffer",
+                receipt_id=integration["batch_id"], content_sha256="0" * 64,
+            )
         finally:
             reopened.close()
     finally:
@@ -228,6 +402,34 @@ async def test_committed_sessiondb_user_row_proves_matrix_receipt_after_reopen(t
             db.close()
         except Exception:
             pass
+
+
+@pytest.mark.asyncio
+async def test_dead_process_claim_without_receipt_is_reclaimed(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile"))
+    monkeypatch.setenv("MATRIX_ALLOWED_USERS", "@alice:example.org,@agent-b:example.org")
+    monkeypatch.setenv("MATRIX_REQUIRE_MENTION", "false")
+    monkeypatch.setenv("MATRIX_AUTO_THREAD", "false")
+    adapter = _make_adapter(extra={"peer_agent_ids": ["@agent-b:example.org"]})
+    adapter._peer_message_buffer = MatrixPeerBuffer(
+        tmp_path / "profile" / "matrix_peer_messages.sqlite3", PeerBufferConfig(enabled=True))
+    store = adapter._peer_message_buffer
+    store.add(room_id="!room1:example.org", event_id="$peer", sender="@peer:hs", timestamp=1, body="x")
+    batch = store.prepare_batch("!room1:example.org")
+    assert batch and store.claim_batch(
+        room_id="!room1:example.org", batch_id=batch["batch_id"],
+        session_key="old-session", turn_key="$old",
+    )
+    assert store.bind_batch_content(
+        room_id="!room1:example.org", batch_id=batch["batch_id"], content_sha256="1" * 64,
+    )
+    with sqlite3.connect(store.db_path) as db:
+        db.execute("UPDATE peer_batches SET claim_owner='dead-process' WHERE batch_id=?", (batch["batch_id"],))
+    await adapter._on_room_message(_make_event("continue", sender="@alice:example.org", event_id="$new"))
+    event = adapter.handle_message.await_args.args[0]
+    prepared = await adapter.prepare_inbound_event(event, "new-session", "$new")
+    assert prepared.raw_message["_matrix_peer_batch_id"] == batch["batch_id"]
+    assert "event_id=$peer" in prepared.text
 
 
 @pytest.mark.asyncio

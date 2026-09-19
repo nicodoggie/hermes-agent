@@ -23,3 +23,23 @@
 - Register a Matrix-scoped plugin tool using session platform/chat IDs; reject missing/non-Matrix/cross-room scopes and unknown IDs, while making retries idempotent.
 - Document YAML keys, bounds, delivery/ack semantics, and crash behavior.
 - Run focused Matrix tests and the repository `scripts/run_tests.sh` suites, inspect the final diff, and commit only the task-owned paths.
+
+## Repair status (2026-09-19)
+
+The integration now routes receipt metadata through `GatewayRunner` and `TurnRunner` into the
+real `AIAgent` turn-start transaction. Receipts include the canonical inbound event ID and a
+SHA-256 identity of the exact augmented user content. Both the same-turn acknowledgement tool
+and post-turn settlement use a narrow canonical-row lookup; adapters without an integration
+receipt do no transcript read.
+
+Batch claims carry a process owner. A live process cannot steal its own active reservation; a
+new process may reclaim a dead reservation only when the old canonical row has no exact receipt.
+Successful non-auto-clear batches are not prefixed again, while their retained content remains
+available for an idempotent manual acknowledgement. Auto-clear additionally requires the exact
+durable receipt and a successful model turn (intentional `NO_REPLY` remains a successful turn).
+Failure and cancellation release or retain unacknowledged data as appropriate.
+
+Focused verification exercises the gateway-to-TurnRunner metadata route, a real `AIAgent` with a
+fake provider calling the real acknowledgement handler after pre-LLM persistence, exact receipt
+mismatch rejection, dead-process claim recovery, command preservation, retention, concurrency,
+and mention gating. No live gateway, provider, profile, or deployment is used.

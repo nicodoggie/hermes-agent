@@ -41,7 +41,9 @@ class _NoopAgent:
 
     def run_conversation(self, user_message, conversation_history=None,
                          task_id=None, persist_user_message=None,
-                         persist_user_timestamp=None):
+                         persist_user_timestamp=None, persist_user_display_metadata=None,
+                         persist_user_platform_id=None):
+        type(self).last_persist_metadata = persist_user_display_metadata
         return {
             "final_response": "Hello from the agent.",
             "messages": [],
@@ -152,4 +154,21 @@ def test_run_agent_voice_turn_no_name_error(monkeypatch, tmp_path):
     result = asyncio.new_event_loop().run_until_complete(_run())
     assert result["final_response"] == "Hello from the agent."
 
+
+def test_run_agent_routes_inbound_receipt_metadata_to_agent(monkeypatch, tmp_path):
+    """Exercise GatewayRunner -> TurnRunner -> agent, not the helper in isolation."""
+    _setup_monkeypatches(monkeypatch, tmp_path)
+    runner = _make_runner()
+    receipt = {"integration": {"integration": "matrix-peer-buffer", "batch_id": "batch-1"}}
+
+    async def _run():
+        return await runner._run_agent(
+            message="augmented", context_prompt="", history=[],
+            source=_make_voice_source(), session_id="canonical-session",
+            session_key="matrix:route", inbound_message_id="$human",
+            persist_user_display_metadata=receipt,
+        )
+
+    asyncio.new_event_loop().run_until_complete(_run())
+    assert _NoopAgent.last_persist_metadata == receipt
 

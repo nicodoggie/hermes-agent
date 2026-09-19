@@ -13,7 +13,9 @@ receipt, not as Matrix-specific core state:
   "batch_id": "...",
   "room_id": "...",
   "event_ids": ["..."],
-  "reservation_generation": 1
+  "reservation_generation": 1,
+  "inbound_event_id": "$matrix-event",
+  "content_sha256": "sha256-of-exact-persisted-user-content"
 }
 ```
 
@@ -27,8 +29,8 @@ or second SQLite database is treated as the commit point.
 
 `build_turn_context()` calls `_persist_turn_start()` before the first model request.
 The normal and Codex paths use that same SessionDB transaction. The receipt is
-queryable after a process crash by loading the canonical session transcript and
-looking up the user row's bounded `display_metadata.integration` value. If the
+queryable after a process crash with a narrow lookup by canonical session ID and
+platform event ID, followed by exact receipt and content-hash verification. If the
 transaction fails, neither the user row nor receipt is durable and the Matrix batch
 remains retryable. If it commits, restart recovery can find the receipt and settle
 or retry the same batch without appending another user row; platform message-id
@@ -45,7 +47,9 @@ idempotent for an already acknowledged batch.
 Batch reservation is serialized on the canonical resolved `SessionEntry.session_id`
 and turn identity, before context attachment. A losing claim does not attach or
 process the batch. Claimed-but-unsettled batches remain discoverable and readable
-on restart, but preparation never creates a duplicate append. Event IDs are replay
+on restart. A per-process claim owner permits reclaim after restart only when no
+exact canonical receipt exists; a live process cannot steal its active claim.
+Preparation never creates a duplicate append. Event IDs are replay
 safe and bounded metadata is pruned with the bounded batch ledger. Omission is
 represented as a per-reservation generation/delta, acknowledged exactly once, so
 repeated snapshots do not repeat notices.

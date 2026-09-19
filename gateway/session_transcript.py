@@ -537,6 +537,25 @@ class SessionTranscriptMixin:
             logger.debug("transcript tail lookup failed for %s", session_id, exc_info=True)
             return None
 
+    def has_inbound_integration_receipt(
+        self, session_id: str, *, platform_message_id: str, integration: str,
+        receipt_id: str, content_sha256: str,
+    ) -> bool:
+        """Narrow exact-row receipt proof for opt-in inbound integrations."""
+        db = self._db_for_session_id(session_id)
+        if not db:
+            return False
+        try:
+            return db.has_inbound_integration_receipt(
+                session_id, platform_message_id=platform_message_id,
+                integration=integration, receipt_id=receipt_id,
+                content_sha256=content_sha256,
+            )
+        except Exception:
+            logger.debug("inbound integration receipt lookup failed", exc_info=True)
+            return False
+
+
     def rewrite_transcript(
         self, session_id: str, messages: list[dict[str, Any]], active_only: bool = False,
         reject_active_turn_lease: bool = False) -> bool:

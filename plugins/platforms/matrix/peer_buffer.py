@@ -4,9 +4,13 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+
+
+_PROCESS_CLAIM_OWNER = uuid.uuid4().hex
 
 
 @dataclass(frozen=True)
@@ -74,6 +78,8 @@ class MatrixPeerBuffer:
                         ack_count INTEGER NOT NULL DEFAULT 0,
                         reservation_generation INTEGER NOT NULL DEFAULT 0,
                         included INTEGER NOT NULL DEFAULT 0,
+                        content_sha256 TEXT,
+                        claim_owner TEXT,
                         created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
                     );
                     """
@@ -94,6 +100,8 @@ class MatrixPeerBuffer:
                     ("ack_count", "INTEGER NOT NULL DEFAULT 0"),
                     ("reservation_generation", "INTEGER NOT NULL DEFAULT 0"),
                     ("included", "INTEGER NOT NULL DEFAULT 0"),
+                    ("content_sha256", "TEXT"),
+                    ("claim_owner", "TEXT"),
                     ("created_at", "REAL NOT NULL DEFAULT 0"),
                 ):
                     if name not in batch_columns:
@@ -209,11 +217,25 @@ class MatrixPeerBuffer:
                 "(batch_id,room_id,event_ids,omitted_count,state,claimed) VALUES (?,?,?,?,?,0)",
                 (batch_id, room_id, json.dumps(event_ids), omitted, "in_flight"),
             )
-            db.execute(
-                "DELETE FROM peer_batches WHERE room_id=? AND state='acknowledged' AND rowid NOT IN "
-                "(SELECT rowid FROM peer_batches WHERE room_id=? ORDER BY rowid DESC LIMIT 256)",
-                (room_id, room_id),
-            )
+            terminal = db.execute(
+                "SELECT rowid,event_ids,state FROM peer_batches WHERE room_id=? "
+                "AND state IN ('delivered','acknowledged') ORDER BY rowid DESC",
+                (room_id,),
+            ).fetchall()
+            removable = []
+            for row in terminal[256:]:
+                ids = json.loads(row["event_ids"])
+                retained = 0
+                if ids:
+                    placeholders = ",".join("?" for _ in ids)
+                    retained = db.execute(
+                        f"SELECT count(*) FROM peer_messages WHERE room_id=? AND event_id IN ({placeholders})",
+                        (room_id, *ids),
+                    ).fetchone()[0]
+                if row["state"] == "acknowledged" or not retained:
+                    removable.append(row["rowid"])
+            if removable:
+                db.executemany("DELETE FROM peer_batches WHERE rowid=?", ((rowid,) for rowid in removable))
             db.commit()
         return {"batch_id": batch_id, "event_ids": event_ids, "omitted_count": omitted}
 
@@ -222,23 +244,41 @@ class MatrixPeerBuffer:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             batch = db.execute(
-                "SELECT state,claimed,session_key,turn_key FROM peer_batches "
+                "SELECT state,claimed,session_key,turn_key,claim_owner FROM peer_batches "
                 "WHERE batch_id=? AND room_id=?", (batch_id, room_id)
             ).fetchone()
             if not batch or batch["state"] != "in_flight":
                 db.rollback()
                 return False
             if batch["claimed"]:
-                same = batch["session_key"] == session_key and batch["turn_key"] == turn_key
+                same = (
+                    batch["session_key"] == session_key and batch["turn_key"] == turn_key
+                    and batch["claim_owner"] == _PROCESS_CLAIM_OWNER
+                )
                 db.commit()
                 return same
             db.execute(
-                "UPDATE peer_batches SET claimed=1,session_key=?,turn_key=? "
+                "UPDATE peer_batches SET claimed=1,session_key=?,turn_key=?,claim_owner=? "
                 "WHERE batch_id=? AND room_id=? AND state='in_flight' AND claimed=0",
-                (session_key, turn_key, batch_id, room_id),
+                (session_key, turn_key, _PROCESS_CLAIM_OWNER, batch_id, room_id),
             )
             db.commit()
         return True
+
+    def reclaim_batch(
+        self, *, room_id: str, batch_id: str, session_key: str, turn_key: str,
+    ) -> bool:
+        """Reclaim only a claim created by a different (dead) gateway process."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            updated = db.execute(
+                "UPDATE peer_batches SET session_key=?,turn_key=?,claim_owner=?,content_sha256=NULL "
+                "WHERE room_id=? AND batch_id=? AND state='in_flight' AND claimed=1 "
+                "AND (claim_owner IS NULL OR claim_owner<>?)",
+                (session_key, turn_key, _PROCESS_CLAIM_OWNER, room_id, batch_id, _PROCESS_CLAIM_OWNER),
+            ).rowcount
+            db.commit()
+        return bool(updated)
 
     def complete_batch(self, *, room_id: str, batch_id: str, success: bool, auto_clear: bool = False) -> bool:
         """Settle only a batch previously prepared for this room; failed turns remain retryable."""
@@ -265,7 +305,8 @@ class MatrixPeerBuffer:
                 return False
             if not success:
                 db.execute(
-                    "UPDATE peer_batches SET claimed=0,session_key=NULL,turn_key=NULL WHERE batch_id=?",
+                    "UPDATE peer_batches SET claimed=0,session_key=NULL,turn_key=NULL,claim_owner=NULL,content_sha256=NULL "
+                    "WHERE batch_id=?",
                     (batch_id,),
                 )
                 db.commit()
@@ -293,6 +334,18 @@ class MatrixPeerBuffer:
                            (len(ids), batch_id))
             db.commit()
         return True
+
+    def bind_batch_content(self, *, room_id: str, batch_id: str, content_sha256: str) -> bool:
+        """Bind a claimed batch to the exact augmented user content before attachment."""
+        with self._connect() as db:
+            updated = db.execute(
+                "UPDATE peer_batches SET content_sha256=? "
+                "WHERE room_id=? AND batch_id=? AND state='in_flight' AND claimed=1 "
+                "AND (content_sha256 IS NULL OR content_sha256=?)",
+                (content_sha256, room_id, batch_id, content_sha256),
+            ).rowcount
+            db.commit()
+        return bool(updated)
 
     def acknowledge_batch(self, *, room_id: str, batch_id: str, session_key: str | None = None) -> int:
         """Acknowledge a known batch owned by the current Matrix room/session."""
@@ -326,12 +379,37 @@ class MatrixPeerBuffer:
             db.execute("UPDATE peer_batches SET state='acknowledged',ack_count=? WHERE batch_id=?",
                        (int(count), batch_id))
             db.execute(
-                "UPDATE peer_buffer_meta SET delivered_omitted_count=MAX(delivered_omitted_count, ?) "
+                "UPDATE peer_buffer_meta SET delivered_omitted_count=delivered_omitted_count+? "
                 "WHERE room_id=?",
                 (int(batch["omitted_count"]), room_id),
             )
             db.commit()
         return int(count)
+
+    def batch_receipt(self, *, room_id: str, batch_id: str) -> dict | None:
+        """Return bounded identity needed to prove this batch's exact canonical row."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT session_key,turn_key,event_ids FROM peer_batches "
+                "WHERE room_id=? AND batch_id=? AND claimed=1",
+                (room_id, batch_id),
+            ).fetchone()
+        if not row or not row["session_key"] or not row["turn_key"]:
+            return None
+        return {
+            "session_id": row["session_key"],
+            "inbound_event_id": row["turn_key"],
+            "event_ids": json.loads(row["event_ids"]),
+            "content_sha256": self._batch_content_hash(room_id=room_id, batch_id=batch_id),
+        }
+
+    def _batch_content_hash(self, *, room_id: str, batch_id: str) -> str:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT content_sha256 FROM peer_batches WHERE room_id=? AND batch_id=?",
+                (room_id, batch_id),
+            ).fetchone()
+        return str(row[0] or "") if row else ""
 
     def mark_included(self, *, room_id: str, batch_id: str) -> bool:
         """Record the read-back proof that the exact user row committed."""

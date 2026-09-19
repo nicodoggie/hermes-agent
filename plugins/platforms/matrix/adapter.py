@@ -26,6 +26,7 @@ add a third member so it has >2 joined members.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import array
 import inspect
 import json
@@ -2067,14 +2068,41 @@ class MatrixAdapter(MatrixInboundMixin, BasePlatformAdapter):
             session_key=canonical_session_id, turn_key=turn_key,
         )
         if not claimed:
-            return event
+            receipt = self._peer_message_buffer.batch_receipt(
+                room_id=room_id, batch_id=batch["batch_id"],
+            )
+            committed = False
+            if receipt and receipt.get("content_sha256"):
+                from hermes_state import SessionDB
+                session_db = SessionDB(get_hermes_home() / "state.db")
+                try:
+                    committed = session_db.has_inbound_integration_receipt(
+                        receipt["session_id"],
+                        platform_message_id=receipt["inbound_event_id"],
+                        integration="matrix-peer-buffer", receipt_id=batch["batch_id"],
+                        content_sha256=receipt["content_sha256"],
+                    )
+                finally:
+                    session_db.close()
+            if committed or not self._peer_message_buffer.reclaim_batch(
+                room_id=room_id, batch_id=batch["batch_id"],
+                session_key=canonical_session_id, turn_key=turn_key,
+            ):
+                return event
         augmented, _ = self._prepend_peer_buffer(room_id, event.text, batch=batch)
+        content_sha256 = hashlib.sha256(augmented.encode("utf-8")).hexdigest()
+        if not self._peer_message_buffer.bind_batch_content(
+            room_id=room_id, batch_id=batch["batch_id"], content_sha256=content_sha256,
+        ):
+            return event
         marker = {
             "integration": "matrix-peer-buffer",
             "batch_id": batch["batch_id"],
             "room_id": room_id,
             "event_ids": list(batch["event_ids"]),
             "reservation_generation": int(batch.get("reservation_generation", 0)),
+            "inbound_event_id": str(turn_key),
+            "content_sha256": content_sha256,
         }
         new_raw = dict(raw)
         new_raw["_matrix_peer_batch_id"] = batch["batch_id"]
@@ -2083,21 +2111,17 @@ class MatrixAdapter(MatrixInboundMixin, BasePlatformAdapter):
         event.raw_message = new_raw
         return event
 
-    def inbound_persistence_confirmed(self, event: MessageEvent, transcript: list[dict]) -> bool:
+    def inbound_persistence_confirmed(self, event: MessageEvent, committed: bool) -> bool:
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         batch_id = raw.get("_matrix_peer_batch_id")
         if not batch_id:
             return False
-        for row in reversed(transcript or []):
-            metadata = row.get("display_metadata") if isinstance(row, dict) else None
-            integration = metadata.get("integration") if isinstance(metadata, dict) else None
-            if isinstance(integration, dict) and integration.get("batch_id") == batch_id:
-                raw["_persisted_integration_receipt"] = True
-                self._peer_message_buffer.mark_included(
-                    room_id=event.source.chat_id, batch_id=str(batch_id),
-                )
-                return True
-        return False
+        if not committed:
+            return False
+        raw["_persisted_integration_receipt"] = True
+        return self._peer_message_buffer.mark_included(
+            room_id=event.source.chat_id, batch_id=str(batch_id),
+        )
 
     async def _on_room_message(self, event: Any) -> None:
         room_id = str(getattr(event, "room_id", ""))
@@ -2514,7 +2538,10 @@ class MatrixAdapter(MatrixInboundMixin, BasePlatformAdapter):
             self._peer_message_buffer.complete_batch(
                 room_id=room_id,
                 batch_id=str(batch_id),
-                success=outcome == ProcessingOutcome.SUCCESS,
+                success=(
+                    outcome == ProcessingOutcome.SUCCESS
+                    and bool(raw.get("_inbound_model_turn_succeeded"))
+                ),
                 auto_clear=self._peer_message_buffer.config.auto_clear,
             )
         if not self._reactions_enabled or not msg_id or not room_id or outcome == ProcessingOutcome.CANCELLED:

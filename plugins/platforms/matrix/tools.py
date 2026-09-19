@@ -3,6 +3,7 @@ import json
 
 from gateway.session_context import get_session_env
 from hermes_constants import get_hermes_home
+from hermes_state import SessionDB
 
 from .peer_buffer import MatrixPeerBuffer, PeerBufferConfig
 
@@ -12,15 +13,32 @@ def _ack_peer_messages(args: dict) -> str:
     if get_session_env("HERMES_SESSION_PLATFORM", "").lower() != "matrix":
         return json.dumps({"ok": False, "error": "Matrix session required"})
     room_id = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
+    session_id = get_session_env("HERMES_SESSION_ID", "").strip()
     batch_id = args.get("batch_id") if isinstance(args, dict) else None
-    if not room_id or not isinstance(batch_id, str) or not batch_id:
-        return json.dumps({"ok": False, "error": "batch_id and a Matrix room session are required"})
+    if not room_id or not session_id or not isinstance(batch_id, str) or not batch_id:
+        return json.dumps({"ok": False, "error": "batch_id and a canonical Matrix room session are required"})
     store = MatrixPeerBuffer(get_hermes_home() / "matrix_peer_messages.sqlite3", PeerBufferConfig(enabled=True))
     try:
+        receipt = store.batch_receipt(room_id=room_id, batch_id=batch_id)
+        if receipt is None:
+            raise ValueError("unknown or undelivered Matrix peer batch")
+        session_db = SessionDB(get_hermes_home() / "state.db")
+        try:
+            committed = session_db.has_inbound_integration_receipt(
+                session_id,
+                platform_message_id=receipt["inbound_event_id"],
+                integration="matrix-peer-buffer", receipt_id=batch_id,
+                content_sha256=receipt["content_sha256"],
+            )
+        finally:
+            session_db.close()
+        if not committed:
+            raise ValueError("unknown or undelivered Matrix peer batch")
+        store.mark_included(room_id=room_id, batch_id=batch_id)
         count = store.acknowledge_batch(
             room_id=room_id,
             batch_id=batch_id,
-            session_key=get_session_env("HERMES_SESSION_KEY") or None,
+            session_key=session_id,
         )
     except ValueError as exc:
         return json.dumps({"ok": False, "error": str(exc)})
