@@ -84,22 +84,28 @@ class SlashCommandsMixin:
             AvailableCommand(name=name, description=desc, input=UnstructuredCommandInput(hint=hint) if hint else None)
             for name, (_help, desc, hint) in self._COMMANDS.items()
         ]
+        # Port of MiniMax-AI/minimax-code#244: installed skills join the editor's `/` palette
+        # (built-ins keep precedence); a failed skill scan still advertises the native roster.
         from agent.runtime_cwd import reset_session_cwd, set_session_cwd
         from agent.skill_commands import get_skill_commands
 
         token = set_session_cwd(state.cwd)
         try:
-            for key, info in get_skill_commands().items():
-                name = key.lstrip("/")
-                if name in self._COMMANDS:
-                    continue
-                commands.append(AvailableCommand(
-                    name=name,
-                    description=info.get("description") or f"Invoke the {info.get('name') or name} skill",
-                    input=UnstructuredCommandInput(hint="optional instruction"),
-                ))
+            skill_commands = get_skill_commands()
+        except Exception:
+            logger.warning("Skill command scan failed; advertising built-in ACP commands only", exc_info=True)
+            skill_commands = {}
         finally:
             reset_session_cwd(token)
+        for key, info in skill_commands.items():
+            name = key.lstrip("/")
+            if name in self._COMMANDS:
+                continue
+            commands.append(AvailableCommand(
+                name=name,
+                description=info.get("description") or f"Invoke the {info.get('name') or name} skill",
+                input=UnstructuredCommandInput(hint="optional instruction"),
+            ))
         return commands
 
     async def _send_available_commands_update(self, state: SessionState) -> None:
