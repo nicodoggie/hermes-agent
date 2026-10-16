@@ -2133,18 +2133,6 @@ class MatrixAdapter(MatrixInboundMixin, BasePlatformAdapter):
             raise RuntimeError("could not bind Matrix peer batch to canonical inbound content")
         marker["content_sha256"] = content_sha256
 
-    def inbound_persistence_confirmed(self, event: MessageEvent, committed: bool) -> bool:
-        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
-        batch_id = raw.get("_matrix_peer_batch_id")
-        if not batch_id:
-            return False
-        if not committed:
-            return False
-        raw["_persisted_integration_receipt"] = True
-        return self._peer_message_buffer.mark_included(
-            room_id=event.source.chat_id, batch_id=str(batch_id),
-        )
-
     async def _on_room_message(self, event: Any) -> None:
         room_id = str(getattr(event, "room_id", ""))
         sender = str(getattr(event, "sender", ""))

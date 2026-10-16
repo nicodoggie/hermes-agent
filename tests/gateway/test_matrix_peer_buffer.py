@@ -395,20 +395,25 @@ def test_real_agent_persists_receipt_before_same_turn_ack_tool(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
-async def test_gated_peer_is_buffered_without_model_call_then_delivered(monkeypatch, tmp_path):
+@pytest.mark.parametrize("gate", ["mention", "budget"])
+async def test_gated_peer_is_buffered_without_model_call_then_delivered(monkeypatch, tmp_path, gate):
     monkeypatch.setenv("MATRIX_ALLOWED_USERS", "@alice:example.org,@agent-b:example.org")
     monkeypatch.setenv("MATRIX_REQUIRE_MENTION", "true")
     monkeypatch.setenv("MATRIX_AUTO_THREAD", "false")
     adapter = _make_adapter(extra={
         "peer_agent_ids": ["@agent-b:example.org"],
+        "peer_require_mention": gate == "mention",
         "peer_reply_budget_per_human_message": 1,
         "peer_message_buffer": {"enabled": True},
     })
     adapter._peer_message_buffer = MatrixPeerBuffer(
         tmp_path / "profile" / "state.sqlite3", PeerBufferConfig(enabled=True))
+    remaining = 1 if gate == "mention" else 0
+    adapter._peer_reply_budget_remaining["!room1:example.org"] = remaining
     await adapter._on_room_message(_make_event(
         "peer hello", sender="@agent-b:example.org", event_id="$blocked"))
     adapter.handle_message.assert_not_awaited()
+    assert adapter._peer_reply_budget_remaining["!room1:example.org"] == remaining
 
     await adapter._on_room_message(_make_event(
         "@hermes:example.org continue", sender="@alice:example.org", event_id="$human"))
@@ -425,7 +430,7 @@ async def test_gated_peer_is_buffered_without_model_call_then_delivered(monkeypa
 async def test_shared_room_prefix_receipt_acks_final_canonical_user_row(monkeypatch, tmp_path):
     """The receipt follows generic inbound transforms through the real registry ack."""
     import model_tools
-    import gateway.run_turn as run_turn
+    import gateway.run_turn_prepare as run_turn
     from gateway.config import Platform
     from gateway.run_inbound import GatewayInboundMixin
     from gateway.run_turn import GatewayTurnMixin
@@ -459,7 +464,8 @@ async def test_shared_room_prefix_receipt_acks_final_canonical_user_row(monkeypa
         group_sessions_per_user=False, thread_sessions_per_user=False, multiplex_profiles=False,
     )
     runner._peek_session_state = lambda _key: None
-    runner._adapter_for_source = lambda _source: adapter
+    runner._intake_adapter_for = lambda _source: adapter
+    runner._delivery_adapter_for = lambda _source: adapter
     expanded_inputs = []
     async def expand_trigger(_source, _key, text):
         expanded_inputs.append(text)
@@ -469,7 +475,7 @@ async def test_shared_room_prefix_receipt_acks_final_canonical_user_row(monkeypa
     runner._hmwa_open_session = AsyncMock(return_value=(False, False))
     runner._set_session_env = lambda _context: []
     runner._clear_session_env = lambda _tokens: None
-    runner._pinned_session_context_prompt = lambda *_args: "prompt"
+    runner._pinned_session_context_prompt = lambda *_args, **_kwargs: "prompt"
     runner._hmwa_acquire_turn_lease = AsyncMock()
     runner._mark_durable_active_turn = AsyncMock()
     runner._hmwa_run_session_hygiene = AsyncMock(return_value=[])
@@ -480,7 +486,7 @@ async def test_shared_room_prefix_receipt_acks_final_canonical_user_row(monkeypa
         run_turn, "build_session_context",
         lambda _source, _config, entry: SimpleNamespace(session_id=entry.session_id),
     )
-    entry = SimpleNamespace(session_id="canonical-session", session_key="matrix:route")
+    entry = SimpleNamespace(session_id="canonical-session", session_key="matrix:route", yolo=None)
     event.text = "human turn @file:human.txt"
     prepared, _tokens = await runner._hmwa_prepare_turn(
         event, source, entry, "matrix:route", "quick", 1,
@@ -537,18 +543,28 @@ async def test_shared_room_prefix_receipt_acks_final_canonical_user_row(monkeypa
 async def test_gateway_prepares_matrix_batch_after_hygiene_rotation(monkeypatch):
     """Exercise the real turn-preparation ordering across canonical-id rotation."""
     import gateway.run as gateway_run
-    import gateway.run_turn as run_turn
+    import gateway.run_turn_prepare as run_turn
 
-    runner = run_turn.GatewayTurnMixin()
-    entry = SimpleNamespace(session_id="pre-hygiene", session_key="matrix:route")
+    from gateway.run_turn import GatewayTurnMixin
+    runner = GatewayTurnMixin()
+    entry = SimpleNamespace(session_id="pre-hygiene", session_key="matrix:route", yolo=None)
     event = SimpleNamespace(
         text="human", message_id="$human", raw_message={}, internal=False,
         auto_skill=None, channel_prompt=None, timestamp=None,
     )
-    source = SimpleNamespace(platform=SimpleNamespace(value="matrix"), chat_id="!room:hs")
+    source = SimpleNamespace(
+        platform=SimpleNamespace(value="matrix"), profile=None, scope_id=None,
+        chat_id="!room:hs", thread_id=None,
+    )
     observed = []
 
     class Adapter:
+        def attach_inbound_context(self, event, content):
+            return content
+
+        def bind_inbound_persistence_content(self, event, content):
+            pass
+
         async def prepare_inbound_event(self, prepared_event, canonical_session_id, turn_key):
             observed.append(canonical_session_id)
             prepared_event.raw_message["_persist_user_display_metadata"] = {"integration": {
@@ -563,11 +579,12 @@ async def test_gateway_prepares_matrix_batch_after_hygiene_rotation(monkeypatch)
         {"role": "user", "content": "3"}, {"role": "assistant", "content": "4"},
     ]
     runner.async_session_store = SimpleNamespace(load_transcript=AsyncMock(return_value=history))
-    runner._adapter_for_source = lambda _source: adapter
+    runner._intake_adapter_for = lambda _source: adapter
+    runner._delivery_adapter_for = lambda _source: adapter
     runner._hmwa_open_session = AsyncMock(return_value=(False, False))
     runner._set_session_env = lambda context: [context.session_id]
     runner._clear_session_env = lambda _tokens: None
-    runner._pinned_session_context_prompt = lambda *_args: "prompt"
+    runner._pinned_session_context_prompt = lambda *_args, **_kwargs: "prompt"
     runner._hmwa_acquire_turn_lease = AsyncMock()
     runner._mark_durable_active_turn = AsyncMock()
 
@@ -585,7 +602,7 @@ async def test_gateway_prepares_matrix_batch_after_hygiene_rotation(monkeypatch)
         run_turn, "build_session_context",
         lambda _source, _config, session: SimpleNamespace(session_id=session.session_id),
     )
-    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", dict)
 
     prepared, tokens = await runner._hmwa_prepare_turn(
         event, source, entry, "matrix:route", "quick", 7,
@@ -648,7 +665,6 @@ async def test_auto_clear_happens_only_after_successful_turn(monkeypatch, tmp_pa
         session_key="canonical-session", turn_key="$ok",
     )
     marker = batch_event.raw_message["_persist_user_display_metadata"]
-    integration = marker["integration"]
     db = SessionDB(home / "state.db")
     db.create_session(session_id="canonical-session", source="matrix", model="test")
     db.append_message(

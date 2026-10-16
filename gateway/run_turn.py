@@ -343,13 +343,13 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
                     receipt_id=str(integration.get("batch_id") or ""),
                     content_sha256=str(integration.get("content_sha256") or ""),
                 )
+                event.raw_message["_inbound_model_turn_succeeded"] = bool(
+                    not agent_failed_early
+                    and not agent_result.get("failed")
+                    and not agent_result.get("interrupted")
+                )
                 if receipt_check(event, committed):
                     event.raw_message["_persisted_integration_receipt"] = True
-                    event.raw_message["_inbound_model_turn_succeeded"] = bool(
-                        not agent_failed_early
-                        and not agent_result.get("failed")
-                        and not agent_result.get("interrupted")
-                    )
             return await self._hmwa_deliver_turn_response(
                 event, source, session_entry, session_key, run_generation,
                 agent_result, agent_messages, response, _footer_line, _intentional_silence,

@@ -26,6 +26,26 @@ class MatrixInboundMixin:
             return None
         return False
 
+    def inbound_persistence_confirmed(self, event, committed: bool) -> bool:
+        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        batch_id = raw.get("_matrix_peer_batch_id")
+        if not batch_id:
+            return False
+        if not committed:
+            return False
+        raw["_persisted_integration_receipt"] = True
+        included = self._peer_message_buffer.mark_included(
+            room_id=event.source.chat_id, batch_id=str(batch_id),
+        )
+        # Durable admission executes a restored event; the transport completion hook
+        # receives the original. Settle where the receipt and model outcome meet.
+        self._peer_message_buffer.complete_batch(
+            room_id=event.source.chat_id, batch_id=str(batch_id), success=included,
+            auto_clear=(self._peer_message_buffer.config.auto_clear
+                        and bool(raw.get("_inbound_model_turn_succeeded"))),
+        )
+        return included
+
     def _configure_peer_budget(self, config: PlatformConfig) -> None:
         peer_agents_raw = config.extra.get("peer_agent_ids", [])
         if isinstance(peer_agents_raw, list):
@@ -99,11 +119,21 @@ class MatrixInboundMixin:
                 logger.debug(
                     "Matrix: ignoring message %s in %s — room not in MATRIX_ALLOWED_ROOMS whitelist", event_id, room_id)
                 return None
+            # Preserve authorized peer traffic even when it cannot spend an inference turn.
+            if is_peer_agent_message and (
+                (self._peer_require_mention and not is_mentioned)
+                or self._peer_reply_budget_remaining.get(room_id, 0) <= 0
+            ):
+                if self._is_authorized_user(sender, room_id, chat_type="group"):
+                    self._buffer_peer_message(room_id, sender, event_id, body, event_ts)
+                return None
             is_free_room = room_id in self._free_rooms
             in_bot_thread = bool(thread_id and thread_id in self._threads)
             if (self._require_mention and not is_free_room and not in_bot_thread
                     and not (is_peer_agent_message and not self._peer_require_mention)):
                 if not is_mentioned and not body.startswith("/"):
+                    if is_peer_agent_message and self._is_authorized_user(sender, room_id, chat_type="group"):
+                        self._buffer_peer_message(room_id, sender, event_id, body, event_ts)
                     if voice_gate is not None:  # parkable voice: a bare @mention may follow (Element X)
                         self._parked_voices.park(room_id, sender, voice_gate, event_id, source_content, relates_to)
                     logger.debug(
@@ -112,6 +142,8 @@ class MatrixInboundMixin:
                     return None
             # Thread-level @mention gating: even in a bot-participated thread.
             elif self._thread_require_mention and in_bot_thread and not is_free_room and not is_mentioned:
+                if is_peer_agent_message and self._is_authorized_user(sender, room_id, chat_type="group"):
+                    self._buffer_peer_message(room_id, sender, event_id, body, event_ts)
                 logger.debug(
                     "Matrix: ignoring message %s in thread %s — no @mention (thread_require_mention=true)",
                     event_id, thread_id)
