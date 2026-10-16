@@ -44,3 +44,24 @@ def check_sender_authorization(
     logger.warning("[%s] Authorization check returned %s for user %s; treating as unknown",
                    adapter.name, type(result).__name__, user_id)
     return None
+
+
+def canonicalize_source(adapter, source: Optional[SessionSource]):
+    """Pin inbound routing identity before adapter authorization or key derivation."""
+    if source is None:
+        return None
+    from gateway.session_identity import canonical_identity, identity_of
+    identity = identity_of(source)
+    if identity is not None:
+        return identity
+    runner = getattr(adapter, "gateway_runner", None)
+    if runner is None or not callable(getattr(runner, "_transport_owner", None)):
+        return None
+    try:
+        return canonical_identity(
+            source, runner=runner, adapter=adapter, transport_profile=adapter._owner_transport_profile())
+    except Exception:
+        # Duck-typed runners (SimpleNamespace / MagicMock rigs) have no registry to resolve
+        # against; the key then falls back to the pre-identity readers instead of failing ingress.
+        logger.debug("[%s] identity resolution failed; using legacy key readers", adapter.name, exc_info=True)
+        return None

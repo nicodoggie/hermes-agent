@@ -175,10 +175,6 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
     """Agent-turn execution for GatewayRunner (see module docstring)."""
 
 
-    def _event_thread_metadata(self, event, source):
-        """Thread metadata for a send that replies to ``event`` on ``source``."""
-        return self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
-
     @staticmethod
     def _pop_post_delivery_callback(adapter, key, generation):
         """Pop the adapter's deferred post-delivery callback for ``key`` (legacy dict fallback)."""
@@ -196,19 +192,6 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
         except Exception:
             return False
 
-
-
-
-    async def _hmwa_stop_typing_for_turn(self, event, source):
-        """Stop the typing indicator (never raises). Slack AI status is scoped to a thread/
-        workspace, so preserve the routing metadata used by the response delivery path."""
-        with suppress(Exception):
-            _typing_adapter = self._delivery_adapter_for(source)
-            _kind = type(_typing_adapter)
-            if _typing_adapter and callable(getattr(_kind, "_stop_typing_with_metadata", None)):
-                await _typing_adapter._stop_typing_with_metadata(source.chat_id, self._event_thread_metadata(event, source))
-            elif _typing_adapter and callable(getattr(_kind, "stop_typing", None)):
-                await _typing_adapter.stop_typing(source.chat_id)
 
 
 
@@ -332,24 +315,8 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
                 hidden_reasoning_incomplete=hidden_reasoning_incomplete,
                 is_context_overflow_failure=is_context_overflow_failure,
             )
-            marker = prepared.persist_user_display_metadata
-            integration = marker.get("integration") if isinstance(marker, dict) else None
-            receipt_check = getattr(self._intake_adapter_for(source), "inbound_persistence_confirmed", None)
-            if isinstance(integration, dict) and receipt_check is not None and isinstance(event.raw_message, dict):
-                committed = await self.async_session_store.has_inbound_integration_receipt(
-                    session_entry.session_id,
-                    platform_message_id=str(integration.get("inbound_event_id") or ""),
-                    integration=str(integration.get("integration") or ""),
-                    receipt_id=str(integration.get("batch_id") or ""),
-                    content_sha256=str(integration.get("content_sha256") or ""),
-                )
-                event.raw_message["_inbound_model_turn_succeeded"] = bool(
-                    not agent_failed_early
-                    and not agent_result.get("failed")
-                    and not agent_result.get("interrupted")
-                )
-                if receipt_check(event, committed):
-                    event.raw_message["_persisted_integration_receipt"] = True
+            await self._hmwa_confirm_inbound_persistence(
+                event, source, session_entry, prepared, agent_result, agent_failed_early)
             return await self._hmwa_deliver_turn_response(
                 event, source, session_entry, session_key, run_generation,
                 agent_result, agent_messages, response, _footer_line, _intentional_silence,

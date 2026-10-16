@@ -42,6 +42,46 @@ logger = logging.getLogger("gateway.run")
 
 
 class GatewayTurnPersistenceMixin:
+    def _event_thread_metadata(self, event, source):
+        """Thread metadata for a send that replies to ``event`` on ``source``."""
+        return self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
+
+    async def _hmwa_stop_typing_for_turn(self, event, source):
+        """Stop the typing indicator (never raises). Slack AI status is scoped to a thread/
+        workspace, so preserve the routing metadata used by the response delivery path."""
+        with suppress(Exception):
+            _typing_adapter = self._delivery_adapter_for(source)
+            _kind = type(_typing_adapter)
+            if _typing_adapter and callable(getattr(_kind, "_stop_typing_with_metadata", None)):
+                await _typing_adapter._stop_typing_with_metadata(source.chat_id, self._event_thread_metadata(event, source))
+            elif _typing_adapter and callable(getattr(_kind, "stop_typing", None)):
+                await _typing_adapter.stop_typing(source.chat_id)
+
+
+
+    async def _hmwa_confirm_inbound_persistence(
+        self, event, source, session_entry, prepared, agent_result, agent_failed_early,
+    ):
+        """Publish the classified outcome where the restored event owns its durable receipt."""
+        marker = prepared.persist_user_display_metadata
+        integration = marker.get("integration") if isinstance(marker, dict) else None
+        receipt_check = getattr(self._intake_adapter_for(source), "inbound_persistence_confirmed", None)
+        if isinstance(integration, dict) and receipt_check is not None and isinstance(event.raw_message, dict):
+            committed = await self.async_session_store.has_inbound_integration_receipt(
+                session_entry.session_id,
+                platform_message_id=str(integration.get("inbound_event_id") or ""),
+                integration=str(integration.get("integration") or ""),
+                receipt_id=str(integration.get("batch_id") or ""),
+                content_sha256=str(integration.get("content_sha256") or ""),
+            )
+            event.raw_message["_inbound_model_turn_succeeded"] = bool(
+                not agent_failed_early
+                and not agent_result.get("failed")
+                and not agent_result.get("interrupted")
+            )
+            if receipt_check(event, committed):
+                event.raw_message["_persisted_integration_receipt"] = True
+
     async def _hmwa_shape_agent_response(
         self, agent_result, source, history, session_entry, session_key,
         _quick_key, run_generation, _run_start_session_id, _platform_name, _msg_start_time,

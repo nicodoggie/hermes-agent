@@ -97,7 +97,7 @@ def _read_peer_messages(args: dict, **_kwargs) -> str:
 def register_tools(ctx) -> None:
     ctx.register_tool(
         name="matrix_read_peer_messages",
-        toolset="hermes-matrix",
+        toolset="matrix",
         schema={
             "name": "matrix_read_peer_messages",
             "description": "List or read retained delivered Matrix peer batches in the current room.",
@@ -118,7 +118,7 @@ def register_tools(ctx) -> None:
     )
     ctx.register_tool(
         name="matrix_ack_peer_messages",
-        toolset="hermes-matrix",
+        toolset="matrix",
         schema={
             "name": "matrix_ack_peer_messages",
             "description": "Acknowledge an exact delivered Matrix peer batch in the current room.",

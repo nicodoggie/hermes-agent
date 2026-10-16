@@ -1906,42 +1906,6 @@ class SessionMessagesMixin:
             "SELECT 1 FROM messages WHERE session_id = ? AND platform_message_id = ? LIMIT 1",
             (session_id, platform_message_id)) is not None
 
-    def has_inbound_integration_receipt(
-        self, session_id: str, *, platform_message_id: str, integration: str,
-        receipt_id: str, content_sha256: str,
-    ) -> bool:
-        """Verify one exact committed inbound receipt without loading the transcript.
-
-        The platform id narrows the indexed canonical row; the integration name, stable
-        receipt id, and hash of that row's persisted content prevent loose metadata-only
-        matches from authorizing settlement.
-        """
-        import hashlib
-
-        row = self._read_one(
-            "SELECT content, display_metadata FROM messages "
-            "WHERE session_id = ? AND role = 'user' AND platform_message_id = ? "
-            "ORDER BY id DESC LIMIT 1",
-            (session_id, platform_message_id),
-        )
-        if row is None:
-            return False
-        metadata = self._decode_display_metadata(row[1])
-        receipt = metadata.get("integration") if isinstance(metadata, dict) else None
-        if not isinstance(receipt, dict):
-            return False
-        content = self._decode_content(row[0])
-        actual_hash = hashlib.sha256(
-            content.encode("utf-8") if isinstance(content, str) else b""
-        ).hexdigest()
-        return (
-            receipt.get("integration") == integration
-            and receipt.get("batch_id") == receipt_id
-            and receipt.get("inbound_event_id") == platform_message_id
-            and receipt.get("content_sha256") == content_sha256 == actual_hash
-        )
-
-
     def _is_explicit_fork_child_row(self, session: dict[str, Any], *, include_reset: bool = False) -> bool:
         """True when *session* is a branch, delegate, or tool child of its parent (``include_reset``: also a
         reset fork). Markers only count when they point at ``parent_session_id``: compression copies

@@ -177,6 +177,43 @@ _HANDOFF_FAIL_SQL = "UPDATE sessions SET handoff_state = 'failed', handoff_error
 class SessionGatewayMixin:
     """Routing index, session peers/orphans, hygiene streaks, heartbeats, handoffs."""
 
+    def has_inbound_integration_receipt(
+        self, session_id: str, *, platform_message_id: str, integration: str,
+        receipt_id: str, content_sha256: str,
+    ) -> bool:
+        """Verify one exact committed inbound receipt without loading the transcript.
+
+        The platform id narrows the indexed canonical row; the integration name, stable
+        receipt id, and hash of that row's persisted content prevent loose metadata-only
+        matches from authorizing settlement.
+        """
+        import hashlib
+
+        row = self._read_one(
+            "SELECT content, display_metadata FROM messages "
+            "WHERE session_id = ? AND role = 'user' AND platform_message_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (session_id, platform_message_id),
+        )
+        if row is None:
+            return False
+        metadata = self._decode_display_metadata(row[1])
+        receipt = metadata.get("integration") if isinstance(metadata, dict) else None
+        if not isinstance(receipt, dict):
+            return False
+        content = self._decode_content(row[0])
+        actual_hash = hashlib.sha256(
+            content.encode("utf-8") if isinstance(content, str) else b""
+        ).hexdigest()
+        return (
+            receipt.get("integration") == integration
+            and receipt.get("batch_id") == receipt_id
+            and receipt.get("inbound_event_id") == platform_message_id
+            and receipt.get("content_sha256") == content_sha256 == actual_hash
+        )
+
+
+
     def _reap_inactive_orphan_desktop_holders(
         self, holders: list[tuple[int, str]], *, min_age_seconds: float) -> list[int]:
         """Terminate old PPID-1 Desktop ephemeral backends with no client.

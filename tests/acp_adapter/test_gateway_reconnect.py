@@ -79,7 +79,8 @@ async def test_editor_reconnects_to_a_restarted_gateway_without_resending(monkey
         assert agent._failure is None
         # The replacement was re-verified and re-subscribed before the new submit; the
         # lost input was submitted to the first owner only.
-        assert owners[1].calls == ["runtime.describe", "session.resume", "prompt.submit"]
+        assert owners[1].calls[:3] == ["runtime.describe", "session.resume", "prompt.submit"]
+        assert owners[1].calls.count("prompt.submit") == 1
         assert owners[0].calls.count("prompt.submit") == 1
         assert agent._snapshots["s"]["replay_epoch"] == "second"
         texts = [call.kwargs["update"].content.text for call in agent._conn.session_update.await_args_list

@@ -2399,28 +2399,9 @@ class BasePlatformAdapter(ABC):
         return owner if isinstance(owner, str) and owner.strip() else None
 
     def _canonicalize(self, source: Optional[SessionSource]):
-        """Pin the source's :class:`RoutingIdentity` before anything derives a key from it. Every
-        ingress path (fresh event, batch merge, busy path, control command, callback) calls this
-        FIRST. Returns the identity, or ``None`` when it cannot be resolved (a rejected route under
-        multiplexing marks ``source.profile_route_rejected``; ``_drop_unresolved`` reads it) or when
-        no runner seam exists (hand-built adapters, restored sources: the legacy readers stay)."""
-        if source is None:
-            return None
-        from gateway.session_identity import canonical_identity, identity_of
-        identity = identity_of(source)
-        if identity is not None:
-            return identity
-        runner = getattr(self, "gateway_runner", None)
-        if runner is None or not callable(getattr(runner, "_transport_owner", None)):
-            return None
-        try:
-            return canonical_identity(
-                source, runner=runner, adapter=self, transport_profile=self._owner_transport_profile())
-        except Exception:
-            # Duck-typed runners (SimpleNamespace / MagicMock rigs) have no registry to resolve
-            # against; the key then falls back to the pre-identity readers instead of failing ingress.
-            logger.debug("[%s] identity resolution failed; using legacy key readers", self.name, exc_info=True)
-            return None
+        """Pin routing identity before any ingress key derivation."""
+        from gateway.platforms.base_authorization import canonicalize_source
+        return canonicalize_source(self, source)
 
     def _drop_unresolved(self, event: MessageEvent) -> bool:
         """True when *event* must be dropped: its identity could not be resolved because the route

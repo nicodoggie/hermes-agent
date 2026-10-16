@@ -99,3 +99,36 @@ async def test_budget_uses_final_thread_pairing_grant(routed_matrix, synthetic, 
         assert source.guild_id == "example.org"
         assert runner._canonicalize(source).runtime_profile == "secondary"
         assert runner._is_user_authorized_for_source(source) is authorized
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("grant_profile", ["default", "secondary"])
+@pytest.mark.parametrize("gate", ["mention", "budget", "thread"])
+async def test_suppressed_peer_retention_uses_final_source(routed_matrix, grant_profile, gate):
+    runner, adapter = routed_matrix
+    room, sender = "!room:example.org", "@yomi:example.org"
+    store = runner.pairing_stores[grant_profile]
+    store._save_json(store._approved_path("matrix"), {sender: {}})
+    from plugins.platforms.matrix.peer_buffer import MatrixPeerBuffer, PeerBufferConfig
+    from hermes_constants import get_hermes_home
+
+    adapter._peer_message_buffer = MatrixPeerBuffer(
+        get_hermes_home() / "peer-buffer.db", PeerBufferConfig(enabled=True))
+    adapter._matrix_session_scope = "thread"
+    adapter._peer_require_mention = gate == "mention"
+    adapter._thread_require_mention = gate == "thread"
+    adapter._peer_reply_budget_remaining[room] = 0 if gate == "budget" else 2
+    adapter._threads.__contains__ = Mock(return_value=gate == "thread")
+    content = {"msgtype": "m.text", "body": "pending peer context"}
+    if gate == "thread":
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$routed"}
+    event = SimpleNamespace(room_id=room, sender=sender, event_id="$routed",
+                            timestamp=int(time.time() * 1000), content=content)
+
+    await adapter._on_room_message(event)
+
+    pending = adapter._peer_message_buffer.pending(room)["messages"]
+    assert [message["event_id"] for message in pending] == (
+        ["$routed"] if grant_profile == "secondary" else [])
+    assert adapter._peer_reply_budget_remaining[room] == (0 if gate == "budget" else 2)
+    adapter.handle_message.assert_not_awaited()
