@@ -327,7 +327,9 @@ class GatewayACPAgent(GatewayControlsMixin, acp.Agent):
         from acp_adapter.gateway_session_meta import available_commands_update
         await asyncio.sleep(0)  # after the session reply: the editor routes updates by a known id
         try:
-            await self._conn.session_update(session_id=editor_id, update=available_commands_update())
+            info = self._snapshots[session_id].get("info") or {}
+            commands = await asyncio.to_thread(available_commands_update, info.get("cwd") or "", home=self._home)
+            await self._conn.session_update(session_id=editor_id, update=commands)
             await self._project_usage(session_id, editor_id,
                                       await (await self._client()).rpc("session.stats", session_id=session_id))
         except Exception:
@@ -560,15 +562,12 @@ class GatewayACPAgent(GatewayControlsMixin, acp.Agent):
         # Only this session's very next prompt may be the editor's retry of an un-acked submit; any
         # prompt (slash work included) retires the retained identity, so a later repeat is new work.
         retained = self._unacked.pop(session_id, None)
-        command = _slash_command(text) if not attachments else None
-        if command is not None:
-            from acp_adapter.gateway_commands import run_command
-            parts = text.strip().split(None, 1)
-            reply, text = await run_command(self, session_id, command, parts[1].strip() if len(parts) > 1 else '')
-            if reply is not None:
-                if self._conn:
-                    await self._conn.session_update(session_id=held_id, update=acp.update_agent_message_text(reply + '\n'))
-                return PromptResponse(stop_reason='end_turn')
+        from acp_adapter.gateway_commands import prepare_prompt
+        reply, text = await prepare_prompt(self, session_id, text, attachments)
+        if reply is not None:
+            if self._conn:
+                await self._conn.session_update(session_id=held_id, update=acp.update_agent_message_text(reply + '\n'))
+            return PromptResponse(stop_reason='end_turn')
         # ... and every prepared control's (a slash keeps its own key: apply retires the rest).
         self._mutations.retire(session_id)
         submit = {'text': text}

@@ -44,11 +44,14 @@ COMMANDS: dict[str, tuple[str, str | None]] = {
 }
 
 
-def available_commands_update() -> AvailableCommandsUpdate:
-    return AvailableCommandsUpdate(session_update="available_commands_update", available_commands=[
+def available_commands_update(cwd="", *, home=None) -> AvailableCommandsUpdate:
+    from acp_adapter.skill_commands import available_skill_commands
+    commands = [
         AvailableCommand(name=name, description=description,
                          input=UnstructuredCommandInput(hint=hint) if hint else None)
-        for name, (description, hint) in COMMANDS.items()])
+        for name, (description, hint) in COMMANDS.items()]
+    commands.extend(available_skill_commands(cwd, COMMANDS, home=home))
+    return AvailableCommandsUpdate(session_update="available_commands_update", available_commands=commands)
 
 
 def help_text() -> str:

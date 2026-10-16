@@ -25,7 +25,8 @@ from acp.schema import (
 )
 
 from acp_adapter.auth import TERMINAL_SETUP_AUTH_METHOD_ID, build_auth_methods, detect_provider
-from acp_adapter.commands import SkillCommandLoadError, SlashCommandsMixin, _estimate_tokens
+from acp_adapter.commands import SlashCommandsMixin, _estimate_tokens
+from acp_adapter.skill_commands import SkillCommandLoadError
 from acp_adapter.session_controls import SessionControlsMixin, apply_controls
 from acp_adapter.content import PromptBlock, _content_blocks_to_openai_user_content, _extract_text
 from acp_adapter.events import (

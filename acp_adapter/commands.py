@@ -15,10 +15,6 @@ from acp_adapter.session import SessionState, _expand_acp_enabled_toolsets
 logger = logging.getLogger("acp_adapter.server")
 
 
-class SkillCommandLoadError(RuntimeError):
-    pass
-
-
 def _estimate_tokens(history: list, agent: Any, system_prompt: str | None = None, tools: Any = None) -> int:
     """Rough request-token estimate over history + system prompt + tool schemas."""
     from agent.model_metadata import estimate_request_tokens_rough
@@ -84,28 +80,8 @@ class SlashCommandsMixin:
             AvailableCommand(name=name, description=desc, input=UnstructuredCommandInput(hint=hint) if hint else None)
             for name, (_help, desc, hint) in self._COMMANDS.items()
         ]
-        # Port of MiniMax-AI/minimax-code#244: installed skills join the editor's `/` palette
-        # (built-ins keep precedence); a failed skill scan still advertises the native roster.
-        from agent.runtime_cwd import reset_session_cwd, set_session_cwd
-        from agent.skill_commands import get_skill_commands
-
-        token = set_session_cwd(state.cwd)
-        try:
-            skill_commands = get_skill_commands()
-        except Exception:
-            logger.warning("Skill command scan failed; advertising built-in ACP commands only", exc_info=True)
-            skill_commands = {}
-        finally:
-            reset_session_cwd(token)
-        for key, info in skill_commands.items():
-            name = key.lstrip("/")
-            if name in self._COMMANDS:
-                continue
-            commands.append(AvailableCommand(
-                name=name,
-                description=info.get("description") or f"Invoke the {info.get('name') or name} skill",
-                input=UnstructuredCommandInput(hint="optional instruction"),
-            ))
+        from acp_adapter.skill_commands import available_skill_commands
+        commands.extend(available_skill_commands(state.cwd, self._COMMANDS))
         return commands
 
     async def _send_available_commands_update(self, state: SessionState) -> None:
@@ -122,36 +98,8 @@ class SlashCommandsMixin:
         self._schedule_soon(lambda: self._send_available_commands_update(state))
 
     def _expand_skill_command(self, text: str, state: SessionState) -> str | None:
-        parts = text.split(maxsplit=1)
-        command = parts[0]
-        instruction = parts[1] if len(parts) > 1 else ""
-        from agent.runtime_cwd import reset_session_cwd, set_session_cwd
-        from agent.skill_commands import (
-            build_skill_invocation_message,
-            build_stacked_skill_invocation_message,
-            resolve_skill_command_key,
-            split_stacked_skill_commands,
-        )
-
-        token = set_session_cwd(state.cwd)
-        try:
-            key = resolve_skill_command_key(command.lstrip("/").lower())
-            if key is None:
-                return None
-            extra_keys, user_instruction = split_stacked_skill_commands(instruction)
-            if extra_keys:
-                stacked = build_stacked_skill_invocation_message(
-                    [key, *extra_keys], user_instruction, task_id=state.session_id
-                )
-                if stacked:
-                    return stacked[0]
-                raise SkillCommandLoadError(f"Failed to load stacked skills starting with {key}")
-            expanded = build_skill_invocation_message(key, user_instruction, task_id=state.session_id)
-            if expanded is None:
-                raise SkillCommandLoadError(f"Failed to load skill for {key}")
-            return expanded
-        finally:
-            reset_session_cwd(token)
+        from acp_adapter.skill_commands import expand_skill_command
+        return expand_skill_command(text, state.cwd, state.session_id)
 
     def _handle_slash_command(self, text: str, state: SessionState) -> str | None:
         """Dispatch a slash command; ``None`` for unknown ones so they fall through to the LLM."""

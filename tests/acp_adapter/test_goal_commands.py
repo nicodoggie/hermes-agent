@@ -28,7 +28,7 @@ async def test_inprocess_goal_dispatch_continuation_and_cold_lifecycle(tmp_path,
     agent.on_connect(conn)
     state = manager.create_session(cwd=str(tmp_path))
     sid = state.session_id
-    assert 'goal' in {cmd.name for cmd in agent._available_commands()}
+    assert 'goal' in {cmd.name for cmd in agent._available_commands(state)}
 
     async def slash(text):
         return await agent.prompt([acp.text_block(text), acp.text_block(RUNTIME_CONTEXT)], sid)

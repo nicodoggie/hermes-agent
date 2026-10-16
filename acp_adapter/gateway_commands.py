@@ -7,6 +7,8 @@ next prompt, which the session's FIFO runs after any turn in flight.
 """
 from __future__ import annotations
 
+import asyncio
+
 from hermes_cli.gateway_client import GatewayClientError, GatewayRPCError
 
 # Reports the owner answers for a local session (``gateway/session_commands.py::_READ_COMMANDS``).
@@ -14,6 +16,29 @@ _READS = frozenset({'context', 'usage', 'status', 'version'})
 _MUTATIONS = frozenset({'model', 'compress', 'new', 'branch'})
 _PROMPTS = frozenset({'steer', 'queue'})
 COMMANDS = _READS | _MUTATIONS | _PROMPTS | {'help', 'tools', 'reasoning', 'fast', 'goal'}
+
+
+async def prepare_prompt(agent, session_id, text, attachments):
+    """Native controls win; local skills expand before the gateway owns prompt execution."""
+    from acp_adapter.gateway_server import _slash_command
+    from acp_adapter.skill_commands import SkillCommandLoadError, expand_skill_command
+
+    if attachments:
+        return None, text
+    command = _slash_command(text)
+    if command is not None:
+        parts = text.strip().split(None, 1)
+        return await run_command(agent, session_id, command, parts[1].strip() if len(parts) > 1 else '')
+    if text.lstrip().startswith('/'):
+        info = agent._snapshots[session_id].get('info') or {}
+        try:
+            expanded = await asyncio.to_thread(expand_skill_command, text, info.get('cwd') or '',
+                                               session_id, home=agent._home)
+        except SkillCommandLoadError as exc:
+            return str(exc), None
+        if expanded is not None:
+            return None, expanded
+    return None, text
 
 
 async def run_command(agent, session_id, command, arg):
